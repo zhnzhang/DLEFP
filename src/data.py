@@ -1,8 +1,5 @@
-import json
-import math
 import os
 import pickle
-import random
 from collections import defaultdict
 import xml.etree.ElementTree as ET
 from sklearn.model_selection import StratifiedKFold
@@ -10,11 +7,11 @@ from sklearn.model_selection import StratifiedKFold
 import dgl
 import numpy as np
 import torch
-from torch.utils.data import Dataset, DataLoader
-from transformers import BertTokenizer, BertModel
+from torch.utils.data import Dataset
+from transformers import BertTokenizer
 
 
-def k_fold_split(data_path):
+def k_fold_split(data_path, k_fold):
     # 划分训练集和测试集
     index = []
     labels = []
@@ -30,7 +27,7 @@ def k_fold_split(data_path):
                 label2idx[label] = len(label2idx)
             labels.append(label2idx[label])
 
-    skf = StratifiedKFold(n_splits=5, random_state=0, shuffle=True)
+    skf = StratifiedKFold(n_splits=k_fold, random_state=0, shuffle=True)
     for train, test in skf.split(np.zeros(len(labels)), labels):
         index.append({'train': train, 'test': test})
     return index, label2idx
@@ -39,7 +36,7 @@ def k_fold_split(data_path):
 class BERTDGLREDataset(Dataset):
 
     def __init__(self, src_file, save_file, label2idx,
-                 index, dataset_type, opt=None):
+                 index, dataset_type='train', bert_path=None):
 
         super(BERTDGLREDataset, self).__init__()
 
@@ -54,7 +51,7 @@ class BERTDGLREDataset(Dataset):
                 self.document_data = info['data']
             print('load preprocessed data from {}.'.format(save_file))
         else:
-            bert = Bert(BertModel, 'bert-base-uncased', "../../data/bert-base-uncased")
+            bert = Bert('bert-base-uncased', bert_path)
             self.document_data = []
 
             # read xml file
@@ -137,10 +134,10 @@ class BERTDGLREDataset(Dataset):
                     'triggers': trigger_list,
                     'subwords': bert_subwords,
                     'words': bert_token,
-                    'mask': bert_mask,
+                    'masks': bert_mask,
                     'sentence_id': sentence_id,
                     'trigger_id': trigger_id,
-                    'graph': graph
+                    'graphs': graph
                 })
 
             # save data
@@ -156,10 +153,10 @@ class BERTDGLREDataset(Dataset):
 
     def __getitem__(self, idx):
         return self.data[idx]['ids'], self.data[idx]['labels'], \
-               self.data[idx]['words'], self.data[idx]['mask'], \
+               self.data[idx]['words'], self.data[idx]['masks'], \
                torch.tensor(self.data[idx]['sentence_id'], dtype=torch.long), \
                torch.tensor(self.data[idx]['trigger_id'], dtype=torch.long), \
-               self.data[idx]['graph']
+               self.data[idx]['graphs']
 
     def create_graph(self, sentence_num, trigger_num, trigger_list):
 
@@ -196,7 +193,7 @@ class Bert():
     CLS = "[CLS]"
     SEP = "[SEP]"
 
-    def __init__(self, model_class, model_name, model_path=None):
+    def __init__(self, model_name, model_path=None):
         super().__init__()
         self.model_name = model_name
         print(model_path)
