@@ -1,2 +1,5 @@
 data/
+checkpoint/
+result/
+src/__pycache__
 .idea/

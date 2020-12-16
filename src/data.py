@@ -7,7 +7,7 @@ from sklearn.model_selection import StratifiedKFold
 import dgl
 import numpy as np
 import torch
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, DataLoader
 from transformers import BertTokenizer
 
 
@@ -93,7 +93,7 @@ class BERTDGLREDataset(Dataset):
 
                 sentence_id = np.zeros((self.document_max_length,), dtype=np.int32)
                 trigger_id = np.zeros((self.document_max_length,), dtype=np.int32)
-                sentence_num = len(Ls)
+                sentence_num = len(Ls) - 1
                 trigger_num = len(trigger_list)
 
                 for idx, v in enumerate(trigger_list, 1):
@@ -127,6 +127,8 @@ class BERTDGLREDataset(Dataset):
                 graph = self.create_graph(sentence_num, trigger_num, trigger_list)
 
                 assert sentence_num + trigger_num == graph.number_of_nodes() - 1
+                assert sentence_num == np.amax(sentence_id)
+                assert trigger_num == np.amax(trigger_id)
 
                 self.document_data.append({
                     'ids': id,
@@ -152,11 +154,13 @@ class BERTDGLREDataset(Dataset):
         return len(self.data)
 
     def __getitem__(self, idx):
-        return self.data[idx]['ids'], self.data[idx]['labels'], \
+        return self.data[idx]['ids'], \
+               torch.tensor(self.data[idx]['labels'], dtype=torch.long), \
                self.data[idx]['words'], self.data[idx]['masks'], \
                torch.tensor(self.data[idx]['sentence_id'], dtype=torch.long), \
                torch.tensor(self.data[idx]['trigger_id'], dtype=torch.long), \
                self.data[idx]['graphs']
+        # return self.data[idx]['graphs'], torch.tensor(self.data[idx]['labels'], dtype=torch.long)
 
     def create_graph(self, sentence_num, trigger_num, trigger_list):
 
@@ -183,7 +187,7 @@ class BERTDGLREDataset(Dataset):
         d[('node', 'global', 'node')].append((0, 0))
 
         graph = dgl.heterograph(d)
-        print(graph)
+        # print(graph)
 
         return graph
 
@@ -284,10 +288,40 @@ class Bert():
         return torch.tensor([ids])
 
 
+def collate(samples):
+    ids, labels, words, masks, sentence_id, trigger_id, graphs = map(list, zip(*samples))
+    batched_ids = tuple(ids)
+    batched_labels = torch.tensor(labels)
+    batched_words = torch.stack(words)
+    batched_masks = torch.stack(masks)
+    batched_sentence_id = torch.stack(sentence_id)
+    batched_trigger_id = torch.stack(trigger_id)
+    batched_graph = dgl.batch(graphs)
+    return batched_ids, batched_labels, batched_words, batched_masks, \
+           batched_sentence_id, batched_trigger_id, batched_graph
+
+
+def get_data(opt, label2idx, index):
+    trainset = BERTDGLREDataset(opt.data_path, opt.data_save_path, label2idx,
+                                index, dataset_type='train', bert_path=opt.bert_path)
+    trainloader = DataLoader(trainset, batch_size=opt.batch_size,
+                             shuffle=True, num_workers=opt.num_workers,
+                             collate_fn=collate)
+    testset = BERTDGLREDataset(opt.data_path, opt.data_save_path, label2idx,
+                                index, dataset_type='test', bert_path=opt.bert_path)
+    testloader = DataLoader(testset, batch_size=opt.test_batch_size,
+                            shuffle=False, num_workers=opt.num_workers,
+                            collate_fn=collate)
+    return trainloader, testloader
+
 
 if __name__ == '__main__':
-    index, label2idx = k_fold_split("../data/dlef_corpus/train.xml")
+    index, label2idx = k_fold_split("../data/dlef_corpus/train.xml", 5)
     train_set = BERTDGLREDataset('../data/dlef_corpus/train.xml', '../data/train.pkl', label2idx, index[0],
-                                 dataset_type='train')
+                                 dataset_type='train', bert_path="../../data/bert-base-uncased")
     a, b, c, d, e, f, g = train_set.__getitem__(0)
+    dataloader = DataLoader(train_set, batch_size=2, shuffle=False, collate_fn=collate)
+    for a, b, c, d, e, f, g in dataloader:
+        g_unbatch = dgl.unbatch(g)
+        print("hello")
     print("end")

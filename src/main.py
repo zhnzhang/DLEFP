@@ -5,24 +5,10 @@ import numpy as np
 from sklearn.metrics import f1_score
 
 from transformers.optimization import AdamW
-from code import get_train_args
-from code import k_fold_split, BERTDGLREDataset
-from code import GAIN_BERT
+from src.config import get_train_args
+from src.data import k_fold_split, get_data
+from src.model import GAIN_BERT
 os.environ["CUDA_VISIBLE_DEVICES"] = '2,3'
-
-
-def get_data(opt, label2idx, index):
-    trainset = BERTDGLREDataset(opt.data_path, opt.data_save_path, label2idx,
-                                index, dataset_type='train', bert_path=opt.bert_path)
-    trainloader = torch.utils.data.DataLoader(trainset, batch_size=opt.batch_size,
-                                              shuffle=True,
-                                              num_workers=opt.num_workers)
-    testset = BERTDGLREDataset(opt.data_path, opt.data_save_path, label2idx,
-                                index, dataset_type='test', bert_path=opt.bert_path)
-    testloader = torch.utils.data.DataLoader(testset, batch_size=opt.test_batch_size,
-                                             shuffle=False,
-                                             num_workers=opt.num_workers)
-    return trainloader, testloader
 
 
 def train(model, trainloader, optimizer, opt):
@@ -36,7 +22,6 @@ def train(model, trainloader, optimizer, opt):
             masks = masks.cuda()
             sentence_id = sentence_id.cuda()
             trigger_id = trigger_id.cuda()
-            graphs = graphs.cuda()
             labels = labels.cuda()
 
         optimizer.zero_grad()

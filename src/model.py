@@ -22,21 +22,27 @@ class GAIN_BERT(nn.Module):
             for p in self.bert.parameters():
                 p.requires_grad = False
 
-        self.gcn_dim = config.gcn_dim
-        assert self.gcn_dim == config.bert_hid_size + config.entity_id_size + config.entity_type_size
+        self.gcn_in_dim = config.bert_hid_size
+        self.gcn_hid_dim = config.gcn_hid_dim
+        self.gcn_out_dim = config.gcn_out_dim
+        self.dropout = config.dropout
 
         rel_name_lists = ['global', 'ss', 'st']
-        self.GCN_layers = nn.ModuleList([RelGraphConvLayer(self.gcn_dim, self.gcn_dim, rel_name_lists,
-                                                           num_bases=len(rel_name_lists), activation=self.activation,
-                                                           self_loop=True, dropout=self.config.dropout)
-                                         for i in range(config.gcn_layers)])
+        self.GCN_layers = nn.ModuleList()
+        self.GCN_layers.append(RelGraphConvLayer(self.gcn_in_dim, self.gcn_hid_dim, rel_name_lists,
+                                                 num_bases=len(rel_name_lists), activation=self.activation,
+                                                 self_loop=False, dropout=self.dropout))
+        self.GCN_layers.append(RelGraphConvLayer(self.gcn_hid_dim, self.gcn_out_dim, rel_name_lists,
+                                                 num_bases=len(rel_name_lists), activation=self.activation,
+                                                 self_loop=False, dropout=self.dropout))
 
-        self.dropout = nn.Dropout(self.config.dropout)
+        self.bank_size = self.gcn_in_dim + self.gcn_hid_dim + self.gcn_out_dim
+        self.linear_dim = config.linear_dim
         self.predict = nn.Sequential(
-            nn.Linear(self.bank_size * 5 + self.gcn_dim * 4, self.bank_size * 2),
+            nn.Linear(self.bank_size, self.linear_dim),
             self.activation,
-            self.dropout,
-            nn.Linear(self.bank_size * 2, config.relation_nums),
+            nn.Dropout(self.dropout),
+            nn.Linear(self.linear_dim, num_classes),
         )
 
     def forward(self, **params):
@@ -53,48 +59,47 @@ class GAIN_BERT(nn.Module):
         h_t_pairs: [batch_size, h_t_limit, 2]
         ht_pair_distance: [batch_size, h_t_limit]
         '''
-        words = params['words']
-        mask = params['mask']
+        words = params['words']  # [batch_size, seq_len=512]
+        mask = params['masks']  # [batch_size, seq_len]
         bsz, slen = words.size()
 
         encoder_outputs, sentence_cls = self.bert(input_ids=words, attention_mask=mask)
         # encoder_outputs[mask == 0] = 0
 
-        graphs = params['graphs']
+        graph_big = params['graphs']
 
         trigger_id = params['trigger_id']
         sentence_id = params['sentence_id']
         features = None
 
-        for i in range(len(graphs)):
+        for i in range(bsz):
             encoder_output = encoder_outputs[i]  # [slen, bert_hid]
             trigger_num = torch.max(trigger_id[i])
             trigger_index = (torch.arange(trigger_num) + 1).unsqueeze(1).expand(-1, slen).to(self.device)  # [
-            # mention_num, slen]
-            triggers = trigger_id[i].unsqueeze(0).expand(trigger_num, -1)  # [mention_num, slen]
-            trigger_select_metrix = (trigger_index == triggers).float()  # [mention_num, slen]
-            # average word -> mention
+            # trigger_num, slen]
+            triggers = trigger_id[i].unsqueeze(0).expand(trigger_num, -1)  # [trigger_num, slen]
+            trigger_select_metrix = (trigger_index == triggers).float()  # [trigger_num, slen]
+            # average word -> trigger
             trigger_word_total_numbers = torch.sum(trigger_select_metrix, dim=-1).unsqueeze(-1).expand(-1, slen)  # [
-            # mention_num, slen]
-            trigger_select_metrix = torch.where(trigger_word_total_numbers > 0, trigger_select_metrix /
-                                        trigger_word_total_numbers,
-                                        trigger_select_metrix)
-
-            trigger_x = torch.mm(trigger_select_metrix, encoder_output)  # [mention_num, bert_hid]
+            # trigger_num, slen]
+            trigger_select_metrix = torch.where(trigger_word_total_numbers > 0,
+                                                trigger_select_metrix / trigger_word_total_numbers,
+                                                trigger_select_metrix)
+            trigger_x = torch.mm(trigger_select_metrix, encoder_output)  # [trigger_num, bert_hid]
 
             sentence_num = torch.max(sentence_id[i])
             sentence_index = (torch.arange(sentence_num) + 1).unsqueeze(1).expand(-1, slen).to(self.device)  # [
-            # mention_num, slen]
-            sentences = sentence_id[i].unsqueeze(0).expand(sentence_num, -1)  # [mention_num, slen]
-            sentence_select_metrix = (sentence_index == sentences).float()  # [mention_num, slen]
-            # average word -> mention
+            # sentence_num, slen]
+            sentences = sentence_id[i].unsqueeze(0).expand(sentence_num, -1)  # [sentence_num, slen]
+            sentence_select_metrix = (sentence_index == sentences).float()  # [sentence_num, slen]
+            # average word -> sentence
             sentence_word_total_numbers = torch.sum(sentence_select_metrix, dim=-1).unsqueeze(-1).expand(-1, slen)  # [
-            # mention_num, slen]
+            # sentence_num, slen]
             sentence_select_metrix = torch.where(sentence_word_total_numbers > 0,
                                                  sentence_select_metrix / sentence_word_total_numbers,
                                                  sentence_select_metrix)
+            sentence_x = torch.mm(sentence_select_metrix, encoder_output)  # [sentence_num, bert_hid]
 
-            sentence_x = torch.mm(sentence_select_metrix, encoder_output)  # [mention_num, bert_hid]
             x = torch.cat((sentence_cls[i].unsqueeze(0), sentence_x), dim=0)
             x = torch.cat((x, trigger_x), dim=0)
 
@@ -103,22 +108,25 @@ class GAIN_BERT(nn.Module):
             else:
                 features = torch.cat((features, x), dim=0)
 
-        graph_big = dgl.batch(graphs)
+        assert features.size()[0] == graph_big.number_of_nodes('node'), "number of nodes inconsistent"
         output_features = [features]
 
         for GCN_layer in self.GCN_layers:
-            features = GCN_layer(graph_big, {"node": features})["node"]  # [total_mention_nums, gcn_dim]
+            features = GCN_layer(graph_big, {"node": features})["node"]  # [total_node_nums, gcn_dim]
             output_features.append(features)
 
         output_feature = torch.cat(output_features, dim=-1)
+        assert output_feature.size()[0] == graph_big.number_of_nodes('node'), "number of nodes inconsistent"
 
         graphs = dgl.unbatch(graph_big)
 
         idx = 0
-        document_feature = output_feature[idx].unsuqeeze(0)
+        document_feature = output_feature[idx].unsqueeze(0)
         for i in range(len(graphs) - 1):
             idx += graphs[i].number_of_nodes('node')
             document_feature = torch.cat((document_feature, output_feature[idx].unsqueeze(0)), dim=0)
+
+        assert document_feature.size()[0] == bsz, "batch size inconsistent"
 
         # classification
         predictions = self.predict(document_feature)
