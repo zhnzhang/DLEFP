@@ -5,11 +5,12 @@ import pickle
 import random
 from collections import defaultdict
 import xml.etree.ElementTree as ET
+from sklearn.model_selection import StratifiedKFold
 
 import dgl
 import numpy as np
 import torch
-from torch.utils.data import Dataset, IterableDataset, DataLoader
+from torch.utils.data import Dataset, DataLoader
 from transformers import BertTokenizer, BertModel
 
 
@@ -37,36 +38,29 @@ def k_fold_split(data_path):
 
 class BERTDGLREDataset(Dataset):
 
-    def __init__(self, src_file, save_file, word2id, ner2id, rel2id,
-                 dataset_type='train', instance_in_train=None, opt=None):
+    def __init__(self, src_file, save_file, label2idx,
+                 index, dataset_type, opt=None):
 
         super(BERTDGLREDataset, self).__init__()
 
-        # record training set mention triples
-        self.instance_in_train = set([]) if instance_in_train is None else instance_in_train
-        self.data = None
+        self.data = []
+        self.document_data = None
         self.document_max_length = 512
-        self.INFRA_EDGE = 0
-        self.INTER_EDGE = 1
-        self.LOOP_EDGE = 2
-        self.count = 0
 
         print('Reading data from {}.'.format(src_file))
         if os.path.exists(save_file):
             with open(file=save_file, mode='rb') as fr:
                 info = pickle.load(fr)
-                self.data = info['data']
-                self.instance_in_train = info['intrain_set']
+                self.document_data = info['data']
             print('load preprocessed data from {}.'.format(save_file))
-
         else:
-            bert = Bert(BertModel, 'bert-base-uncased', opt.bert_path)
+            bert = Bert(BertModel, 'bert-base-uncased', "../../data/bert-base-uncased")
+            self.document_data = []
 
             # read xml file
             tree = ET.parse(src_file)
             root = tree.getroot()
-            for i in index:
-                doc = root[0][i]
+            for doc in root[0]:
                 id = doc.attrib['id']
                 label = label2idx[doc.attrib['document_level_value']]
 
@@ -78,9 +72,9 @@ class BERTDGLREDataset(Dataset):
                     if sent.text == '-EOP- .':
                         continue
                     if len(sent) > 0:
-                        tmp = sent.text.lower().split()
-                        trigger_list.append({'pos': len(tmp),
-                                             'sent_id': len(sentences),
+                        tmp = sent.text.lower().split() if sent.text is not None else []
+                        trigger_list.append({'sent_id': len(sentences),
+                                             'pos': len(tmp),
                                              'global_pos': len(tmp) + Ls[len(sentences)],
                                              'word': sent[0].text.lower(),
                                              'value': label2idx[sent[0].attrib['sentence_level_value']]})
@@ -92,242 +86,109 @@ class BERTDGLREDataset(Dataset):
                     L += len(s)
                     Ls.append(L)
 
-                # generate positive examples
-                train_triple = []
-                new_labels = []
-                for label in labels:
-                    head, tail, relation, evidence = label['h'], label['t'], label['r'], label['evidence']
-                    assert (relation in rel2id), 'no such relation {} in rel2id'.format(relation)
-                    label['r'] = rel2id[relation]
-
-                    train_triple.append((head, tail))
-
-                    label['in_train'] = False
-
-                    # record training set mention triples and mark it for dev and test set
-                    for n1 in entity_list[head]:
-                        for n2 in entity_list[tail]:
-                            mention_triple = (n1['name'], n2['name'], relation)
-                            if dataset_type == 'train':
-                                self.instance_in_train.add(mention_triple)
-                            else:
-                                if mention_triple in self.instance_in_train:
-                                    label['in_train'] = True
-                                    break
-
-                    new_labels.append(label)
-
-                # generate negative examples
-                na_triple = []
-                for j in range(len(entity_list)):
-                    for k in range(len(entity_list)):
-                        if j != k and (j, k) not in train_triple:
-                            na_triple.append((j, k))
-
                 # generate document ids
                 words = []
                 for sentence in sentences:
                     for word in sentence:
                         words.append(word)
 
-                bert_token, bert_starts, bert_subwords = bert.subword_tokenize_to_ids(words)
+                bert_token, bert_mask, bert_starts, bert_subwords = bert.subword_tokenize_to_ids(words)
 
-                word_id = np.zeros((self.document_max_length,), dtype=np.int32)
-                pos_id = np.zeros((self.document_max_length,), dtype=np.int32)
-                ner_id = np.zeros((self.document_max_length,), dtype=np.int32)
-                mention_id = np.zeros((self.document_max_length,), dtype=np.int32)
-                word_id[:] = bert_token[0]
+                sentence_id = np.zeros((self.document_max_length,), dtype=np.int32)
+                trigger_id = np.zeros((self.document_max_length,), dtype=np.int32)
+                sentence_num = len(Ls)
+                trigger_num = len(trigger_list)
 
-                entity2mention = defaultdict(list)
-                mention_idx = 1
-                already_exist = set()
-                for idx, vertex in enumerate(entity_list, 1):
-                    for v in vertex:
+                for idx, v in enumerate(trigger_list, 1):
+                    sent_id, pos = v['sent_id'], v['global_pos']
 
-                        sent_id, (pos0, pos1), ner_type = v['sent_id'], v['global_pos'], v['type']
+                    pos0 = bert_starts[pos]
+                    pos1 = bert_starts[pos + 1]
 
-                        pos0 = bert_starts[pos0]
-                        pos1 = bert_starts[pos1] if pos1 < len(bert_starts) else 1024
+                    if pos0 >= self.document_max_length - 1:
+                        trigger_num = idx
+                        continue
+                    if pos1 >= self.document_max_length - 1:
+                        pos1 = self.document_max_length - 1
 
-                        if (pos0, pos1) in already_exist:
-                            continue
+                    trigger_id[pos0:pos1] = idx
 
-                        if pos0 >= len(pos_id):
-                            continue
-
-                        pos_id[pos0:pos1] = idx
-                        ner_id[pos0:pos1] = ner2id[ner_type]
-                        mention_id[pos0:pos1] = mention_idx
-                        entity2mention[idx].append(mention_idx)
-                        mention_idx += 1
-                        already_exist.add((pos0, pos1))
-                replace_i = 0
-                idx = len(entity_list)
-                if entity2mention[idx] == []:
-                    entity2mention[idx].append(mention_idx)
-                    while mention_id[replace_i] != 0:
-                        replace_i += 1
-                    mention_id[replace_i] = mention_idx
-                    pos_id[replace_i] = idx
-                    ner_id[replace_i] = ner2id[vertex[0]['type']]
-                    mention_idx += 1
-
-                new_Ls = [0]
+                new_Ls = [1]
                 for ii in range(1, len(Ls)):
-                    new_Ls.append(bert_starts[Ls[ii]] if Ls[ii] < len(bert_starts) else len(bert_subwords))
+                    new_Ls.append(bert_starts[Ls[ii]] if Ls[ii] < len(bert_starts) else len(bert_subwords) - 1)
                 Ls = new_Ls
 
+                for idx in range(1, len(Ls)):
+                    pos0 = Ls[idx - 1]
+                    pos1 = Ls[idx]
+                    sentence_id[pos0:pos1] = idx
+                    if pos1 == 511:
+                        sentence_num = idx
+                        break
+
                 # construct graph
-                graph = self.create_graph(Ls, mention_id, pos_id, entity2mention)
+                graph = self.create_graph(sentence_num, trigger_num, trigger_list)
 
-                # construct entity graph & path
-                entity_graph, path = self.create_entity_graph(Ls, pos_id, entity2mention)
+                assert sentence_num + trigger_num == graph.number_of_nodes() - 1
 
-                assert pos_id.max() == len(entity_list)
-                assert mention_id.max() == graph.number_of_nodes() - 1
-
-                overlap = doc.get('overlap_entity_pair', [])
-                new_overlap = [tuple(item) for item in overlap]
-
-                self.data.append({
-                    'title': title,
-                    'entities': entity_list,
-                    'labels': new_labels,
-                    'na_triple': na_triple,
-                    'word_id': word_id,
-                    'pos_id': pos_id,
-                    'ner_id': ner_id,
-                    'mention_id': mention_id,
-                    'entity2mention': entity2mention,
-                    'graph': graph,
-                    'entity_graph': entity_graph,
-                    'path': path,
-                    'overlap': new_overlap
+                self.document_data.append({
+                    'ids': id,
+                    'labels': label,
+                    'triggers': trigger_list,
+                    'subwords': bert_subwords,
+                    'words': bert_token,
+                    'mask': bert_mask,
+                    'sentence_id': sentence_id,
+                    'trigger_id': trigger_id,
+                    'graph': graph
                 })
 
             # save data
             with open(file=save_file, mode='wb') as fw:
-                pickle.dump({'data': self.data, 'intrain_set': self.instance_in_train}, fw)
+                pickle.dump({'data': self.document_data}, fw)
             print('finish reading {} and save preprocessed data to {}.'.format(src_file, save_file))
+
+        for i in index[dataset_type]:
+            self.data.append(self.document_data[i])
 
     def __len__(self):
         return len(self.data)
 
     def __getitem__(self, idx):
-        return self.data[idx]
+        return self.data[idx]['ids'], self.data[idx]['labels'], \
+               self.data[idx]['words'], self.data[idx]['mask'], \
+               torch.tensor(self.data[idx]['sentence_id'], dtype=torch.long), \
+               torch.tensor(self.data[idx]['trigger_id'], dtype=torch.long), \
+               self.data[idx]['graph']
 
-    def process_xml(self, data_path, index, label2idx):
-        texts = []  # [doc_num], list of list of str
-        triggers = []
-        labels = []  # [doc_num], list
-        ids = []  # [doc_num], list
-
-        tree = ET.parse(data_path)
-        root = tree.getroot()
-        for document_set in root:
-            for i in index:
-                document = document_set[i]
-                # id
-                ids.append(document.attrib['id'])
-
-                # label
-                label = document.attrib['document_level_value']
-                labels.append(label2idx[label])
-
-                # text
-                doc = ''
-                for sentence in document:
-                    if len(sentence) > 0:
-                        sent = ''
-                        for text in sentence.itertext():
-                            sent += text
-                        sent = sent.replace('-EOP- ', '').lower()
-                        doc += sent + ' '
-
-                texts.append(doc.strip())
-        return texts, labels, ids
-
-    def create_graph(self, Ls, mention_id, entity_id, entity2mention):
+    def create_graph(self, sentence_num, trigger_num, trigger_list):
 
         d = defaultdict(list)
 
-        # add intra edges
-        for _, mentions in entity2mention.items():
-            for i in range(len(mentions)):
-                for j in range(i + 1, len(mentions)):
-                    d[('node', 'intra', 'node')].append((mentions[i], mentions[j]))
-                    d[('node', 'intra', 'node')].append((mentions[j], mentions[i]))
+        # add sentence-sentence edges
+        for i in range(1, sentence_num + 1):
+            d[('node', 'ss', 'node')].append((i, i))  # self-loop
+            for j in range(i + 1, sentence_num + 1):
+                d[('node', 'ss', 'node')].append((i, j))
+                d[('node', 'ss', 'node')].append((j, i))
 
-        if d[('node', 'intra', 'node')] == []:
-            d[('node', 'intra', 'node')].append((entity2mention[1][0], 0))
+        # add sentence-trigger edges
+        for idx in range(1, trigger_num + 1):
+            i = idx + sentence_num
+            j = trigger_list[idx - 1]['sent_id'] + 1
+            d[('node', 'st', 'node')].append((i, j))
+            d[('node', 'st', 'node')].append((j, i))
 
-        for i in range(1, len(Ls)):
-            tmp = dict()
-            for j in range(Ls[i - 1], Ls[i]):
-                if mention_id[j] != 0:
-                    tmp[mention_id[j]] = entity_id[j]
-            mention_entity_info = [(k, v) for k, v in tmp.items()]
-
-            # add self-loop & to-globle-node edges
-            for m in range(len(mention_entity_info)):
-                # self-loop
-                # d[('node', 'loop', 'node')].append((mention_entity_info[m][0], mention_entity_info[m][0]))
-
-                # to global node
-                d[('node', 'global', 'node')].append((mention_entity_info[m][0], 0))
-                d[('node', 'global', 'node')].append((0, mention_entity_info[m][0]))
-
-            # add inter edges
-            for m in range(len(mention_entity_info)):
-                for n in range(m + 1, len(mention_entity_info)):
-                    if mention_entity_info[m][1] != mention_entity_info[n][1]:
-                        # inter edge
-                        d[('node', 'inter', 'node')].append((mention_entity_info[m][0], mention_entity_info[n][0]))
-                        d[('node', 'inter', 'node')].append((mention_entity_info[n][0], mention_entity_info[m][0]))
-
-        # add self-loop for global node
-        # d[('node', 'loop', 'node')].append((0, 0))
-        if d[('node', 'inter', 'node')] == []:
-            d[('node', 'inter', 'node')].append((entity2mention[1][0], 0))
+        # add global edges
+        for i in range(1, sentence_num + trigger_num + 1):
+            d[('node', 'global', 'node')].append((0, i))
+            d[('node', 'global', 'node')].append((i, 0))
+        d[('node', 'global', 'node')].append((0, 0))
 
         graph = dgl.heterograph(d)
+        print(graph)
 
         return graph
-
-    def create_entity_graph(self, Ls, entity_id, entity2mention):
-
-        graph = dgl.DGLGraph()
-        graph.add_nodes(entity_id.max())
-
-        d = defaultdict(set)
-
-        for i in range(1, len(Ls)):
-            tmp = set()
-            for j in range(Ls[i - 1], Ls[i]):
-                if entity_id[j] != 0:
-                    tmp.add(entity_id[j])
-            tmp = list(tmp)
-            for ii in range(len(tmp)):
-                for jj in range(ii + 1, len(tmp)):
-                    d[tmp[ii] - 1].add(tmp[jj] - 1)
-                    d[tmp[jj] - 1].add(tmp[ii] - 1)
-        a = []
-        b = []
-        for k, v in d.items():
-            for vv in v:
-                a.append(k)
-                b.append(vv)
-        graph.add_edges(a, b)
-
-        path = dict()
-        for i in range(0, graph.number_of_nodes()):
-            for j in range(i + 1, graph.number_of_nodes()):
-                a = set(graph.successors(i).numpy())
-                b = set(graph.successors(j).numpy())
-                c = [val + 1 for val in list(a & b)]
-                path[(i + 1, j + 1)] = c
-
-        return graph, path
 
 
 class Bert():
@@ -397,9 +258,9 @@ class Bert():
         """
         subwords = list(map(self.tokenizer.tokenize, tokens))
         subword_lengths = list(map(len, subwords))
-        subwords = [self.CLS] + list(self.flatten(subwords))[:509] + [self.SEP]
+        subwords = [self.CLS] + list(self.flatten(subwords))[:510] + [self.SEP]
         token_start_idxs = 1 + np.cumsum([0] + subword_lengths[:-1])
-        token_start_idxs[token_start_idxs > 509] = 512
+        token_start_idxs[token_start_idxs > 510] = 511
         return subwords, token_start_idxs
 
     def subword_tokenize_to_ids(self, tokens):
@@ -419,7 +280,7 @@ class Bert():
         """
         subwords, token_start_idxs = self.subword_tokenize(tokens)
         subword_ids, mask = self.convert_tokens_to_ids(subwords)
-        return subword_ids.numpy(), token_start_idxs, subwords
+        return subword_ids[0], mask[0], token_start_idxs, subwords
 
     def segment_ids(self, segment1_len, segment2_len):
         ids = [0] * segment1_len + [1] * segment2_len
@@ -428,9 +289,8 @@ class Bert():
 
 
 if __name__ == '__main__':
-    data_dir = '../data/'
-    rel2id = json.load(open(os.path.join(data_dir, 'rel2id.json'), "r"))
-    word2id = json.load(open(os.path.join(data_dir, 'word2id.json'), "r"))
-    ner2id = json.load(open(os.path.join(data_dir, 'ner2id.json'), "r"))
-    train_set = BERTDGLREDataset('../data/train_annotated.json', '../data/train.pkl', word2id, ner2id, rel2id,
+    index, label2idx = k_fold_split("../data/dlef_corpus/train.xml")
+    train_set = BERTDGLREDataset('../data/dlef_corpus/train.xml', '../data/train.pkl', label2idx, index[0],
                                  dataset_type='train')
+    a, b, c, d, e, f, g = train_set.__getitem__(0)
+    print("end")
