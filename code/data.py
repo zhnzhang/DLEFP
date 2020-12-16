@@ -4,20 +4,38 @@ import os
 import pickle
 import random
 from collections import defaultdict
+import xml.etree.ElementTree as ET
 
 import dgl
 import numpy as np
 import torch
-from torch.utils.data import IterableDataset, DataLoader
-from transformers import *
-
-from models.GAIN import Bert
-from utils import get_cuda
-
-IGNORE_INDEX = -100
+from torch.utils.data import Dataset, IterableDataset, DataLoader
+from transformers import BertTokenizer, BertModel
 
 
-class BERTDGLREDataset(IterableDataset):
+def k_fold_split(data_path):
+    # 划分训练集和测试集
+    index = []
+    labels = []
+    label2idx = {}
+
+    tree = ET.parse(data_path)
+    root = tree.getroot()
+    for document_set in root:
+        for document in document_set:
+            # label
+            label = document.attrib['document_level_value']
+            if label not in label2idx:
+                label2idx[label] = len(label2idx)
+            labels.append(label2idx[label])
+
+    skf = StratifiedKFold(n_splits=5, random_state=0, shuffle=True)
+    for train, test in skf.split(np.zeros(len(labels)), labels):
+        index.append({'train': train, 'test': test})
+    return index, label2idx
+
+
+class BERTDGLREDataset(Dataset):
 
     def __init__(self, src_file, save_file, word2id, ner2id, rel2id,
                  dataset_type='train', instance_in_train=None, opt=None):
@@ -44,29 +62,35 @@ class BERTDGLREDataset(IterableDataset):
         else:
             bert = Bert(BertModel, 'bert-base-uncased', opt.bert_path)
 
-            with open(file=src_file, mode='r', encoding='utf-8') as fr:
-                ori_data = json.load(fr)
-            print('loading..')
-            self.data = []
+            # read xml file
+            tree = ET.parse(src_file)
+            root = tree.getroot()
+            for i in index:
+                doc = root[0][i]
+                id = doc.attrib['id']
+                label = label2idx[doc.attrib['document_level_value']]
 
-            for i, doc in enumerate(ori_data):
-
-                title, entity_list, labels, sentences = \
-                    doc['title'], doc['vertexSet'], doc.get('labels', []), doc['sents']
-
+                trigger_list = []
+                sentences = []
                 Ls = [0]
                 L = 0
-                for x in sentences:
-                    L += len(x)
-                    Ls.append(L)
-                for j in range(len(entity_list)):
-                    for k in range(len(entity_list[j])):
-                        sent_id = int(entity_list[j][k]['sent_id'])
-                        entity_list[j][k]['sent_id'] = sent_id
+                for sent in doc:
+                    if sent.text == '-EOP- .':
+                        continue
+                    if len(sent) > 0:
+                        tmp = sent.text.lower().split()
+                        trigger_list.append({'pos': len(tmp),
+                                             'sent_id': len(sentences),
+                                             'global_pos': len(tmp) + Ls[len(sentences)],
+                                             'word': sent[0].text.lower(),
+                                             'value': label2idx[sent[0].attrib['sentence_level_value']]})
 
-                        dl = Ls[sent_id]
-                        pos0, pos1 = entity_list[j][k]['pos']
-                        entity_list[j][k]['global_pos'] = (pos0 + dl, pos1 + dl)
+                    s = []
+                    for text in sent.itertext():
+                        s += text.replace('-EOP- ', '').lower().split()
+                    sentences.append(s)
+                    L += len(s)
+                    Ls.append(L)
 
                 # generate positive examples
                 train_triple = []
@@ -192,8 +216,36 @@ class BERTDGLREDataset(IterableDataset):
     def __getitem__(self, idx):
         return self.data[idx]
 
-    def __iter__(self):
-        return iter(self.data)
+    def process_xml(self, data_path, index, label2idx):
+        texts = []  # [doc_num], list of list of str
+        triggers = []
+        labels = []  # [doc_num], list
+        ids = []  # [doc_num], list
+
+        tree = ET.parse(data_path)
+        root = tree.getroot()
+        for document_set in root:
+            for i in index:
+                document = document_set[i]
+                # id
+                ids.append(document.attrib['id'])
+
+                # label
+                label = document.attrib['document_level_value']
+                labels.append(label2idx[label])
+
+                # text
+                doc = ''
+                for sentence in document:
+                    if len(sentence) > 0:
+                        sent = ''
+                        for text in sentence.itertext():
+                            sent += text
+                        sent = sent.replace('-EOP- ', '').lower()
+                        doc += sent + ' '
+
+                texts.append(doc.strip())
+        return texts, labels, ids
 
     def create_graph(self, Ls, mention_id, entity_id, entity2mention):
 
@@ -278,205 +330,101 @@ class BERTDGLREDataset(IterableDataset):
         return graph, path
 
 
-class DGLREDataloader(DataLoader):
+class Bert():
+    MASK = '[MASK]'
+    CLS = "[CLS]"
+    SEP = "[SEP]"
 
-    def __init__(self, dataset, batch_size, shuffle=False, h_t_limit_per_batch=300, h_t_limit=1722, relation_num=97,
-                 max_length=512, negativa_alpha=0.0, dataset_type='train'):
-        super(DGLREDataloader, self).__init__(dataset, batch_size=batch_size)
-        self.shuffle = shuffle
-        self.length = len(self.dataset)
-        self.max_length = max_length
-        self.negativa_alpha = negativa_alpha
-        self.dataset_type = dataset_type
+    def __init__(self, model_class, model_name, model_path=None):
+        super().__init__()
+        self.model_name = model_name
+        print(model_path)
+        self.tokenizer = BertTokenizer.from_pretrained(model_path)
+        self.max_len = 512
 
-        self.h_t_limit_per_batch = h_t_limit_per_batch
-        self.h_t_limit = h_t_limit
-        self.relation_num = relation_num
-        self.dis2idx = np.zeros((512), dtype='int64')
-        self.dis2idx[1] = 1
-        self.dis2idx[2:] = 2
-        self.dis2idx[4:] = 3
-        self.dis2idx[8:] = 4
-        self.dis2idx[16:] = 5
-        self.dis2idx[32:] = 6
-        self.dis2idx[64:] = 7
-        self.dis2idx[128:] = 8
-        self.dis2idx[256:] = 9
-        self.dis_size = 20
+    def tokenize(self, text, masked_idxs=None):
+        tokenized_text = self.tokenizer.tokenize(text)
+        if masked_idxs is not None:
+            for idx in masked_idxs:
+                tokenized_text[idx] = self.MASK
+        # prepend [CLS] and append [SEP]
+        # see https://github.com/huggingface/pytorch-pretrained-BERT/blob/master/examples/run_classifier.py#L195  # NOQA
+        tokenized = [self.CLS] + tokenized_text + [self.SEP]
+        return tokenized
 
-        self.order = list(range(self.length))
+    def tokenize_to_ids(self, text, masked_idxs=None, pad=True):
+        tokens = self.tokenize(text, masked_idxs)
+        return tokens, self.convert_tokens_to_ids(tokens, pad=pad)
 
-    def __iter__(self):
-        # shuffle
-        if self.shuffle:
-            random.shuffle(self.order)
-            self.data = [self.dataset[idx] for idx in self.order]
+    def convert_tokens_to_ids(self, tokens, pad=True):
+        token_ids = self.tokenizer.convert_tokens_to_ids(tokens)
+        ids = torch.tensor([token_ids])
+        # assert ids.size(1) < self.max_len
+        ids = ids[:, :self.max_len]  # https://github.com/DreamInvoker/GAIN/issues/4
+        if pad:
+            padded_ids = torch.zeros(1, self.max_len).to(ids)
+            padded_ids[0, :ids.size(1)] = ids
+            mask = torch.zeros(1, self.max_len).to(ids)
+            mask[0, :ids.size(1)] = 1
+            return padded_ids, mask
         else:
-            self.data = self.dataset
-        batch_num = math.ceil(self.length / self.batch_size)
-        self.batches = [self.data[idx * self.batch_size: min(self.length, (idx + 1) * self.batch_size)]
-                        for idx in range(0, batch_num)]
-        self.batches_order = [self.order[idx * self.batch_size: min(self.length, (idx + 1) * self.batch_size)]
-                              for idx in range(0, batch_num)]
+            return ids
 
-        # begin
-        context_word_ids = torch.LongTensor(self.batch_size, self.max_length).cpu()
-        context_pos_ids = torch.LongTensor(self.batch_size, self.max_length).cpu()
-        context_ner_ids = torch.LongTensor(self.batch_size, self.max_length).cpu()
-        context_mention_ids = torch.LongTensor(self.batch_size, self.max_length).cpu()
-        context_word_mask = torch.LongTensor(self.batch_size, self.max_length).cpu()
-        context_word_length = torch.LongTensor(self.batch_size).cpu()
-        ht_pairs = torch.LongTensor(self.batch_size, self.h_t_limit, 2).cpu()
-        relation_multi_label = torch.Tensor(self.batch_size, self.h_t_limit, self.relation_num).cpu()
-        relation_mask = torch.Tensor(self.batch_size, self.h_t_limit).cpu()
-        relation_label = torch.LongTensor(self.batch_size, self.h_t_limit).cpu()
-        ht_pair_distance = torch.LongTensor(self.batch_size, self.h_t_limit).cpu()
+    def flatten(self, list_of_lists):
+        for list in list_of_lists:
+            for item in list:
+                yield item
 
-        for idx, minibatch in enumerate(self.batches):
-            cur_bsz = len(minibatch)
+    def subword_tokenize(self, tokens):
+        """Segment each token into subwords while keeping track of
+        token boundaries.
+        Parameters
+        ----------
+        tokens: A sequence of strings, representing input tokens.
+        Returns
+        -------
+        A tuple consisting of:
+            - A list of subwords, flanked by the special symbols required
+                by Bert (CLS and SEP).
+            - An array of indices into the list of subwords, indicating
+                that the corresponding subword is the start of a new
+                token. For example, [1, 3, 4, 7] means that the subwords
+                1, 3, 4, 7 are token starts, while all other subwords
+                (0, 2, 5, 6, 8...) are in or at the end of tokens.
+                This list allows selecting Bert hidden states that
+                represent tokens, which is necessary in sequence
+                labeling.
+        """
+        subwords = list(map(self.tokenizer.tokenize, tokens))
+        subword_lengths = list(map(len, subwords))
+        subwords = [self.CLS] + list(self.flatten(subwords))[:509] + [self.SEP]
+        token_start_idxs = 1 + np.cumsum([0] + subword_lengths[:-1])
+        token_start_idxs[token_start_idxs > 509] = 512
+        return subwords, token_start_idxs
 
-            for mapping in [context_word_ids, context_pos_ids, context_ner_ids, context_mention_ids,
-                            context_word_mask, context_word_length,
-                            ht_pairs, ht_pair_distance, relation_multi_label, relation_mask, relation_label]:
-                if mapping is not None:
-                    mapping.zero_()
+    def subword_tokenize_to_ids(self, tokens):
+        """Segment each token into subwords while keeping track of
+        token boundaries and convert subwords into IDs.
+        Parameters
+        ----------
+        tokens: A sequence of strings, representing input tokens.
+        Returns
+        -------
+        A tuple consisting of:
+            - A list of subword IDs, including IDs of the special
+                symbols (CLS and SEP) required by Bert.
+            - A mask indicating padding tokens.
+            - An array of indices into the list of subwords. See
+                doc of subword_tokenize.
+        """
+        subwords, token_start_idxs = self.subword_tokenize(tokens)
+        subword_ids, mask = self.convert_tokens_to_ids(subwords)
+        return subword_ids.numpy(), token_start_idxs, subwords
 
-            relation_label.fill_(IGNORE_INDEX)
+    def segment_ids(self, segment1_len, segment2_len):
+        ids = [0] * segment1_len + [1] * segment2_len
+        return torch.tensor([ids])
 
-            max_h_t_cnt = 0
-
-            label_list = []
-            L_vertex = []
-            titles = []
-            indexes = []
-            graph_list = []
-            entity_graph_list = []
-            entity2mention_table = []
-            path_table = []
-            overlaps = []
-
-            for i, example in enumerate(minibatch):
-                title, entities, labels, na_triple, word_id, pos_id, ner_id, mention_id, entity2mention, graph, entity_graph, path = \
-                    example['title'], example['entities'], example['labels'], example['na_triple'], \
-                    example['word_id'], example['pos_id'], example['ner_id'], example['mention_id'], example[
-                        'entity2mention'], example['graph'], example['entity_graph'], example['path']
-                graph_list.append(graph)
-                entity_graph_list.append(entity_graph)
-                path_table.append(path)
-                overlaps.append(example['overlap'])
-
-                entity2mention_t = get_cuda(torch.zeros((pos_id.max() + 1, mention_id.max() + 1)))
-                for e, ms in entity2mention.items():
-                    for m in ms:
-                        entity2mention_t[e, m] = 1
-                entity2mention_table.append(entity2mention_t)
-
-                L = len(entities)
-                word_num = word_id.shape[0]
-
-                context_word_ids[i, :word_num].copy_(torch.from_numpy(word_id))
-                context_pos_ids[i, :word_num].copy_(torch.from_numpy(pos_id))
-                context_ner_ids[i, :word_num].copy_(torch.from_numpy(ner_id))
-                context_mention_ids[i, :word_num].copy_(torch.from_numpy(mention_id))
-
-                idx2label = defaultdict(list)
-                label_set = {}
-                for label in labels:
-                    head, tail, relation, intrain, evidence = \
-                        label['h'], label['t'], label['r'], label['in_train'], label['evidence']
-                    idx2label[(head, tail)].append(relation)
-                    label_set[(head, tail, relation)] = intrain
-
-                label_list.append(label_set)
-
-                if self.dataset_type == 'train':
-                    train_tripe = list(idx2label.keys())
-                    for j, (h_idx, t_idx) in enumerate(train_tripe):
-                        hlist, tlist = entities[h_idx], entities[t_idx]
-                        ht_pairs[i, j, :] = torch.Tensor([h_idx + 1, t_idx + 1])
-                        label = idx2label[(h_idx, t_idx)]
-
-                        delta_dis = hlist[0]['global_pos'][0] - tlist[0]['global_pos'][0]
-                        if delta_dis < 0:
-                            ht_pair_distance[i, j] = -int(self.dis2idx[-delta_dis]) + self.dis_size // 2
-                        else:
-                            ht_pair_distance[i, j] = int(self.dis2idx[delta_dis]) + self.dis_size // 2
-
-                        for r in label:
-                            relation_multi_label[i, j, r] = 1
-
-                        relation_mask[i, j] = 1
-                        rt = np.random.randint(len(label))
-                        relation_label[i, j] = label[rt]
-
-                    lower_bound = len(na_triple)
-                    if self.negativa_alpha > 0.0:
-                        random.shuffle(na_triple)
-                        lower_bound = int(max(20, len(train_tripe) * self.negativa_alpha))
-
-                    for j, (h_idx, t_idx) in enumerate(na_triple[:lower_bound], len(train_tripe)):
-                        hlist, tlist = entities[h_idx], entities[t_idx]
-                        ht_pairs[i, j, :] = torch.Tensor([h_idx + 1, t_idx + 1])
-
-                        delta_dis = hlist[0]['global_pos'][0] - tlist[0]['global_pos'][0]
-                        if delta_dis < 0:
-                            ht_pair_distance[i, j] = -int(self.dis2idx[-delta_dis]) + self.dis_size // 2
-                        else:
-                            ht_pair_distance[i, j] = int(self.dis2idx[delta_dis]) + self.dis_size // 2
-
-                        relation_multi_label[i, j, 0] = 1
-                        relation_label[i, j] = 0
-                        relation_mask[i, j] = 1
-
-                        max_h_t_cnt = max(max_h_t_cnt, len(train_tripe) + lower_bound)
-                else:
-                    j = 0
-                    for h_idx in range(L):
-                        for t_idx in range(L):
-                            if h_idx != t_idx:
-                                hlist, tlist = entities[h_idx], entities[t_idx]
-                                ht_pairs[i, j, :] = torch.Tensor([h_idx + 1, t_idx + 1])
-
-                                relation_mask[i, j] = 1
-
-                                delta_dis = hlist[0]['global_pos'][0] - tlist[0]['global_pos'][0]
-                                if delta_dis < 0:
-                                    ht_pair_distance[i, j] = -int(self.dis2idx[-delta_dis]) + self.dis_size // 2
-                                else:
-                                    ht_pair_distance[i, j] = int(self.dis2idx[delta_dis]) + self.dis_size // 2
-
-                                j += 1
-
-                    max_h_t_cnt = max(max_h_t_cnt, j)
-                    L_vertex.append(L)
-                    titles.append(title)
-                    indexes.append(self.batches_order[idx][i])
-
-            context_word_mask = context_word_ids > 0
-            context_word_length = context_word_mask.sum(1)
-            batch_max_length = context_word_length.max()
-
-            yield {'context_idxs': get_cuda(context_word_ids[:cur_bsz, :batch_max_length].contiguous()),
-                   'context_pos': get_cuda(context_pos_ids[:cur_bsz, :batch_max_length].contiguous()),
-                   'context_ner': get_cuda(context_ner_ids[:cur_bsz, :batch_max_length].contiguous()),
-                   'context_mention': get_cuda(context_mention_ids[:cur_bsz, :batch_max_length].contiguous()),
-                   'context_word_mask': get_cuda(context_word_mask[:cur_bsz, :batch_max_length].contiguous()),
-                   'context_word_length': get_cuda(context_word_length[:cur_bsz].contiguous()),
-                   'h_t_pairs': get_cuda(ht_pairs[:cur_bsz, :max_h_t_cnt, :2]),
-                   'relation_label': get_cuda(relation_label[:cur_bsz, :max_h_t_cnt]).contiguous(),
-                   'relation_multi_label': get_cuda(relation_multi_label[:cur_bsz, :max_h_t_cnt]),
-                   'relation_mask': get_cuda(relation_mask[:cur_bsz, :max_h_t_cnt]),
-                   'ht_pair_distance': get_cuda(ht_pair_distance[:cur_bsz, :max_h_t_cnt]),
-                   'labels': label_list,
-                   'L_vertex': L_vertex,
-                   'titles': titles,
-                   'indexes': indexes,
-                   'graphs': graph_list,
-                   'entity2mention_table': entity2mention_table,
-                   'entity_graphs': entity_graph_list,
-                   'path_table': path_table,
-                   'overlaps': overlaps
-                   }
 
 
 if __name__ == '__main__':
