@@ -5,10 +5,10 @@ import numpy as np
 from sklearn.metrics import f1_score
 
 from transformers.optimization import AdamW
-from src.config import get_train_args
-from src.data import k_fold_split, get_data
-from src.model import GAIN_BERT
-os.environ["CUDA_VISIBLE_DEVICES"] = '2,3'
+from config import get_train_args
+from data import k_fold_split, get_data
+from model import GAIN_BERT
+os.environ["CUDA_VISIBLE_DEVICES"] = '3'
 
 
 def train(model, trainloader, optimizer, opt):
@@ -103,7 +103,7 @@ if __name__=='__main__':
         trainloader, testloader = get_data(opt, label2idx, index[i])
         model = GAIN_BERT(opt, len(label2idx))
         if opt.gpu:
-            model = nn.DataParallel(model)
+            # model = nn.DataParallel(model)
             model.cuda()
         optimizer = AdamW(model.parameters(), lr=opt.lr)
 

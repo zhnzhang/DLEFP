@@ -312,12 +312,12 @@ def get_data(opt, label2idx, index):
     trainset = BERTDGLREDataset(opt.data_path, opt.data_save_path, label2idx,
                                 index, dataset_type='train', bert_path=opt.bert_path)
     trainloader = DataLoader(trainset, batch_size=opt.batch_size,
-                             shuffle=True, num_workers=opt.num_workers,
+                             shuffle=True,
                              collate_fn=collate)
     testset = BERTDGLREDataset(opt.data_path, opt.data_save_path, label2idx,
                                 index, dataset_type='test', bert_path=opt.bert_path)
     testloader = DataLoader(testset, batch_size=opt.test_batch_size,
-                            shuffle=False, num_workers=opt.num_workers,
+                            shuffle=False,
                             collate_fn=collate)
     return trainloader, testloader
 
