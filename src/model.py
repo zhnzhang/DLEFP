@@ -22,7 +22,9 @@ class GAIN_BERT(nn.Module):
             for p in self.bert.parameters():
                 p.requires_grad = False
 
-        self.gcn_in_dim = config.bert_hid_size
+        self.type_embedding = nn.Embedding(num_embeddings=3, embedding_dim=config.type_embed_dim)
+
+        self.gcn_in_dim = config.bert_hid_size + config.type_embed_dim
         self.gcn_hid_dim = config.gcn_hid_dim
         self.gcn_out_dim = config.gcn_out_dim
         self.dropout = config.dropout
@@ -63,8 +65,13 @@ class GAIN_BERT(nn.Module):
         mask = params['masks']  # [batch_size, seq_len]
         bsz, slen = words.size()
 
-        encoder_outputs, sentence_cls = self.bert(input_ids=words, attention_mask=mask)
+        encoder_outputs, sentence_cls = self.bert(input_ids=words, attention_mask=mask)  # sentence_cls: [bsz, bert_hid]
         # encoder_outputs[mask == 0] = 0
+        type_d = self.type_embedding(torch.tensor([0]).to(self.device))
+        type_s = self.type_embedding(torch.tensor([1]).to(self.device))
+        type_t = self.type_embedding(torch.tensor([2]).to(self.device))
+
+        document_x = torch.cat((sentence_cls, type_d.expand(bsz, -1)), dim=-1)  # [bsz, gcn_in_dim]
 
         graph_big = params['graphs']
         graphs = dgl.unbatch(graph_big)
@@ -75,7 +82,7 @@ class GAIN_BERT(nn.Module):
 
         for i in range(bsz):
             encoder_output = encoder_outputs[i]  # [slen, bert_hid]
-            trigger_num = torch.max(trigger_id[i])
+            trigger_num = torch.max(trigger_id[i]).item()
             trigger_index = (torch.arange(trigger_num) + 1).unsqueeze(1).expand(-1, slen).to(self.device)  # [
             # trigger_num, slen]
             triggers = trigger_id[i].unsqueeze(0).expand(trigger_num, -1)  # [trigger_num, slen]
@@ -87,8 +94,9 @@ class GAIN_BERT(nn.Module):
                                                 trigger_select_metrix / trigger_word_total_numbers,
                                                 trigger_select_metrix)
             trigger_x = torch.mm(trigger_select_metrix, encoder_output)  # [trigger_num, bert_hid]
+            trigger_x = torch.cat((trigger_x, type_t.expand(trigger_num, -1)), dim=-1)
 
-            sentence_num = torch.max(sentence_id[i])
+            sentence_num = torch.max(sentence_id[i]).item()
             sentence_index = (torch.arange(sentence_num) + 1).unsqueeze(1).expand(-1, slen).to(self.device)  # [
             # sentence_num, slen]
             sentences = sentence_id[i].unsqueeze(0).expand(sentence_num, -1)  # [sentence_num, slen]
@@ -100,8 +108,9 @@ class GAIN_BERT(nn.Module):
                                                  sentence_select_metrix / sentence_word_total_numbers,
                                                  sentence_select_metrix)
             sentence_x = torch.mm(sentence_select_metrix, encoder_output)  # [sentence_num, bert_hid]
+            sentence_x = torch.cat((sentence_x, type_s.expand(sentence_num, -1)), dim=-1)
 
-            x = torch.cat((sentence_cls[i].unsqueeze(0), sentence_x), dim=0)
+            x = torch.cat((document_x[i].unsqueeze(0), sentence_x), dim=0)
             x = torch.cat((x, trigger_x), dim=0)
 
             assert x.size()[0] == graphs[i].number_of_nodes('node'), \
