@@ -67,6 +67,7 @@ class GAIN_BERT(nn.Module):
         # encoder_outputs[mask == 0] = 0
 
         graph_big = params['graphs']
+        graphs = dgl.unbatch(graph_big)
 
         trigger_id = params['trigger_id']
         sentence_id = params['sentence_id']
@@ -103,12 +104,14 @@ class GAIN_BERT(nn.Module):
             x = torch.cat((sentence_cls[i].unsqueeze(0), sentence_x), dim=0)
             x = torch.cat((x, trigger_x), dim=0)
 
+            assert x.size()[0] == graphs[i].number_of_nodes('node'), \
+                "number of nodes inconsistent: " + str(params['ids'][i])
+
             if features is None:
                 features = x
             else:
                 features = torch.cat((features, x), dim=0)
 
-        assert features.size()[0] == graph_big.number_of_nodes('node'), "number of nodes inconsistent"
         output_features = [features]
 
         for GCN_layer in self.GCN_layers:
@@ -117,8 +120,6 @@ class GAIN_BERT(nn.Module):
 
         output_feature = torch.cat(output_features, dim=-1)
         assert output_feature.size()[0] == graph_big.number_of_nodes('node'), "number of nodes inconsistent"
-
-        graphs = dgl.unbatch(graph_big)
 
         idx = 0
         document_feature = output_feature[idx].unsqueeze(0)

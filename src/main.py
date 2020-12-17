@@ -22,11 +22,13 @@ def train(model, trainloader, optimizer, opt):
             masks = masks.cuda()
             sentence_id = sentence_id.cuda()
             trigger_id = trigger_id.cuda()
+            graphs = graphs.to('cuda')
             labels = labels.cuda()
 
         optimizer.zero_grad()
 
-        logit = model(words=words,
+        logit = model(ids=ids,
+                      words=words,
                       masks=masks,
                       sentence_id=sentence_id,
                       trigger_id=trigger_id,
@@ -57,10 +59,11 @@ def test(model, testloader, opt, filepath=None):
                 masks = masks.cuda()
                 sentence_id = sentence_id.cuda()
                 trigger_id = trigger_id.cuda()
-                graphs = graphs.cuda()
+                graphs = graphs.to('cuda')
                 labels = labels.cuda()
 
-            logit = model(words=words,
+            logit = model(ids=ids,
+                          words=words,
                           masks=masks,
                           sentence_id=sentence_id,
                           trigger_id=trigger_id,

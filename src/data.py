@@ -103,8 +103,8 @@ class BERTDGLREDataset(Dataset):
                     pos1 = bert_starts[pos + 1]
 
                     if pos0 >= self.document_max_length - 1:
-                        trigger_num = idx
-                        continue
+                        trigger_num = idx - 1
+                        break
                     if pos1 >= self.document_max_length - 1:
                         pos1 = self.document_max_length - 1
 
@@ -121,6 +121,9 @@ class BERTDGLREDataset(Dataset):
                     sentence_id[pos0:pos1] = idx
                     if pos1 == 511:
                         sentence_num = idx
+                        break
+                    if pos0 == 511:
+                        sentence_num = idx - 1
                         break
 
                 # construct graph
@@ -179,6 +182,8 @@ class BERTDGLREDataset(Dataset):
             j = trigger_list[idx - 1]['sent_id'] + 1
             d[('node', 'st', 'node')].append((i, j))
             d[('node', 'st', 'node')].append((j, i))
+        if d[('node', 'st', 'node')] == []:
+            d[('node', 'st', 'node')].append((0, 1))
 
         # add global edges
         for i in range(1, sentence_num + trigger_num + 1):
@@ -188,6 +193,8 @@ class BERTDGLREDataset(Dataset):
 
         graph = dgl.heterograph(d)
         # print(graph)
+
+        assert len(graph.etypes) == 3, "etypes wrong"
 
         return graph
 
@@ -316,8 +323,8 @@ def get_data(opt, label2idx, index):
 
 
 if __name__ == '__main__':
-    index, label2idx = k_fold_split("../data/dlef_corpus/train.xml", 5)
-    train_set = BERTDGLREDataset('../data/dlef_corpus/train.xml', '../data/train.pkl', label2idx, index[0],
+    index, label2idx = k_fold_split("../data/dlef_corpus/english.xml", 5)
+    train_set = BERTDGLREDataset('../data/dlef_corpus/english.xml', '../data/train.pkl', label2idx, index[0],
                                  dataset_type='train', bert_path="../../data/bert-base-uncased")
     a, b, c, d, e, f, g = train_set.__getitem__(0)
     dataloader = DataLoader(train_set, batch_size=2, shuffle=False, collate_fn=collate)
