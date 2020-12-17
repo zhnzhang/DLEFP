@@ -23,6 +23,8 @@ def get_train_args():
     parser.add_argument('--dropout', type=float, default=0)
     parser.add_argument('--linear_dim', type=int, default=300)
 
+    parser.add_argument('--type_embed_dim', type=int, default=20)
+
     # BERT
     parser.add_argument('--bert_hid_size', type=int, default=768)
     parser.add_argument('--bert_path', type=str, default="bert-base-uncased")

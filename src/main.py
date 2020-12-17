@@ -8,7 +8,7 @@ from transformers.optimization import AdamW
 from config import get_train_args
 from data import k_fold_split, get_data
 from model import GAIN_BERT
-os.environ["CUDA_VISIBLE_DEVICES"] = '3'
+# os.environ["CUDA_VISIBLE_DEVICES"] = '3'
 
 
 def train(model, trainloader, optimizer, opt):
