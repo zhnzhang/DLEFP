@@ -16,12 +16,10 @@ def train(model, trainloader, optimizer, opt):
     # start_time = time.time()
 
     loss_list = []
-    for batch_idx, (ids, labels, words, masks, sentence_id, trigger_id, graphs) in enumerate(trainloader):
+    for batch_idx, (ids, labels, words, masks, graphs) in enumerate(trainloader):
         if opt.gpu:
             words = words.cuda()
             masks = masks.cuda()
-            sentence_id = sentence_id.cuda()
-            trigger_id = trigger_id.cuda()
             graphs = graphs.to('cuda')
             labels = labels.cuda()
 
@@ -30,8 +28,6 @@ def train(model, trainloader, optimizer, opt):
         logit = model(ids=ids,
                       words=words,
                       masks=masks,
-                      sentence_id=sentence_id,
-                      trigger_id=trigger_id,
                       graphs=graphs)
         loss = nn.functional.cross_entropy(logit, labels)
 
@@ -53,20 +49,16 @@ def test(model, testloader, opt, filepath=None):
     y_true = []
     y_pred = []
     with torch.no_grad():
-        for batch_idx, (ids, labels, words, masks, sentence_id, trigger_id, graphs) in enumerate(testloader):
+        for batch_idx, (ids, labels, words, masks, graphs) in enumerate(testloader):
             if opt.gpu:
                 words = words.cuda()
                 masks = masks.cuda()
-                sentence_id = sentence_id.cuda()
-                trigger_id = trigger_id.cuda()
                 graphs = graphs.to('cuda')
                 labels = labels.cuda()
 
             logit = model(ids=ids,
                           words=words,
                           masks=masks,
-                          sentence_id=sentence_id,
-                          trigger_id=trigger_id,
                           graphs=graphs)
             _, predicted = torch.max(logit.data,1)
             correct += predicted.data.eq(labels.data).cpu().sum()
@@ -97,7 +89,7 @@ if __name__=='__main__':
     index, label2idx = k_fold_split(opt.data_path, opt.k_fold)
     f1_micro_list = []
     f1_macro_list = []
-    for i in range(opt.k_fold):
+    for i in range(1):
         model_path = opt.model_path + "_" + str(i) + ".pt"
         output_path = opt.output_path + "_" + str(i) + ".txt"
         trainloader, testloader = get_data(opt, label2idx, index[i])
@@ -129,11 +121,44 @@ if __name__=='__main__':
         f1_micro_list.append(test_f1_micro)
         f1_macro_list.append(test_f1_macro)
 
+    output = open(opt.output_path + ".txt", "w")
     f1_micro_a = np.mean(f1_micro_list)
     f1_macro_a = np.mean(f1_macro_list)
-    with open(opt.output_path + ".txt", "w") as output:
-        output.write("batch_size=" + str(opt.batch_size) + "\n")
-        output.write("lr=" + str(opt.lr) + "\n")
-        output.write("f1_micro_a: " + str(f1_micro_a) + "\n")
-        output.write("f1_macro_a: " + str(f1_macro_a) + "\n")
+    output.write("batch_size=" + str(opt.batch_size) + "\n")
+    output.write("lr=" + str(opt.lr) + "\n")
+    output.write("f1_micro_a: " + str(f1_micro_a) + "\n")
+    output.write("f1_macro_a: " + str(f1_macro_a) + "\n")
     print("F1_micro_a: %.2f F1_macro_a: %.2f" % (f1_micro_a * 100, f1_macro_a * 100))
+
+    ct_p = []
+    ct_m = []
+    ps_p = []
+    for i in range(1):
+        filename = opt.output_path + "_" + str(i) + ".txt"
+        y_true = []
+        y_pred = []
+        with open(filename, "r") as f:
+            for l in f.readlines():
+                line = l.split()
+                if len(line) < 3:
+                    break
+                y_true.append(line[1])
+                y_pred.append(line[2])
+
+        with open(filename, "a") as f:
+            t_ct_p = f1_score(y_true, y_pred, labels=[0], average="macro")
+            f.write("CT+: " + str(t_ct_p) + "\n")
+            ct_p.append(t_ct_p)
+
+            t_ct_m = f1_score(y_true, y_pred, labels=[1], average="macro")
+            f.write("CT-: " + str(t_ct_m) + "\n")
+            ct_m.append(t_ct_m)
+
+            t_ps_p = f1_score(y_true, y_pred, labels=[2], average="macro")
+            f.write("PS+: " + str(t_ps_p) + "\n")
+            ps_p.append(t_ps_p)
+
+    output.write("CT+: " + str(np.mean(ct_p)) + "\n")
+    output.write("CT-: " + str(np.mean(ct_m)) + "\n")
+    output.write("PS+: " + str(np.mean(ps_p)) + "\n")
+    output.close()

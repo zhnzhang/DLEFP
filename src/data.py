@@ -199,6 +199,126 @@ class BERTDGLREDataset(Dataset):
         return graph
 
 
+class MyDataset(Dataset):
+
+    def __init__(self, src_file, save_file, label2idx,
+                 index, dataset_type='train', bert_path=None):
+
+        super(MyDataset, self).__init__()
+
+        self.data = []
+        self.document_data = None
+        self.document_max_length = 512
+
+        print('Reading data from {}.'.format(src_file))
+        if os.path.exists(save_file):
+            with open(file=save_file, mode='rb') as fr:
+                info = pickle.load(fr)
+                self.document_data = info['data']
+            print('load preprocessed data from {}.'.format(save_file))
+        else:
+            # bert = Bert('bert-base-uncased', bert_path)
+            tok = BertTokenizer.from_pretrained(bert_path)
+            self.document_data = []
+
+            # read xml file
+            tree = ET.parse(src_file)
+            root = tree.getroot()
+            for doc in root[0]:
+                id = doc.attrib['id']
+                label = label2idx[doc.attrib['document_level_value']]
+
+                sentence_list = []
+                for sent in doc:
+                    if sent.text == '-EOP- .':
+                        continue
+                    s = ''
+                    for t in sent.itertext():
+                        s += t
+                    s = s.replace('-EOP- ', '').lower()
+
+                    data = tok(s, return_tensors='pt', padding='max_length', truncation=True, max_length=150)
+                    sent_info = {'sent_id': len(sentence_list),
+                                 'trigger': False,
+                                 'data': data['input_ids'],
+                                 'attention': data['attention_mask']}
+                    if len(sent) > 0:
+                        sent_info['trigger'] = True
+                    sentence_list.append(sent_info)
+
+                # construct graph
+                graph = self.create_graph(sentence_list)
+
+                assert graph.number_of_nodes() == len(sentence_list)
+
+                self.document_data.append({
+                    'ids': id,
+                    'labels': label,
+                    'sentences': sentence_list,
+                    'graphs': graph
+                })
+
+            # save data
+            with open(file=save_file, mode='wb') as fw:
+                pickle.dump({'data': self.document_data}, fw)
+            print('finish reading {} and save preprocessed data to {}.'.format(src_file, save_file))
+
+        for i in index[dataset_type]:
+            self.data.append(self.document_data[i])
+
+    def __len__(self):
+        return len(self.data)
+
+    def __getitem__(self, idx):
+        sentence_list = self.data[idx]['sentences']
+        data_list = []
+        attention_list = []
+        for s in sentence_list:
+            data_list.append(s['data'])
+            attention_list.append(s['attention'])
+        data = torch.cat(data_list, dim=0)
+        attention = torch.cat(attention_list, dim=0)
+        return self.data[idx]['ids'], \
+               torch.tensor(self.data[idx]['labels'], dtype=torch.long), \
+               data, \
+               attention, \
+               self.data[idx]['graphs']
+        # return self.data[idx]['graphs'], torch.tensor(self.data[idx]['labels'], dtype=torch.long)
+
+    def create_graph(self, sentence_list):
+
+        d = defaultdict(list)
+
+        # add neighbor edges
+        for i in range(len(sentence_list) - 1):
+            d[('node', 'neighbor', 'node')].append((i, i + 1))
+            d[('node', 'neighbor', 'node')].append((i + 1, i))
+
+        # add title edges
+        for i in range(1, len(sentence_list)):
+            d[('node', 'title', 'node')].append((0, i))
+            d[('node', 'title', 'node')].append((i, 0))
+
+        # add trigger edges
+        for i in range(len(sentence_list)):
+            u = sentence_list[i]
+            if u['trigger'] == False:
+                continue
+            for j in range(i + 1, len(sentence_list)):
+                v = sentence_list[j]
+                if v['trigger'] == False:
+                    continue
+                d[('node', 'trigger', 'node')].append((u['sent_id'], v['sent_id']))
+                d[('node', 'trigger', 'node')].append((v['sent_id'], u['sent_id']))
+
+        graph = dgl.heterograph(d)
+        # print(graph)
+
+        assert len(graph.etypes) == 3, "etypes wrong"
+
+        return graph
+
+
 class Bert():
     MASK = '[MASK]'
     CLS = "[CLS]"
@@ -296,26 +416,23 @@ class Bert():
 
 
 def collate(samples):
-    ids, labels, words, masks, sentence_id, trigger_id, graphs = map(list, zip(*samples))
+    ids, labels, data, attention, graphs = map(list, zip(*samples))
     batched_ids = tuple(ids)
     batched_labels = torch.tensor(labels)
-    batched_words = torch.stack(words)
-    batched_masks = torch.stack(masks)
-    batched_sentence_id = torch.stack(sentence_id)
-    batched_trigger_id = torch.stack(trigger_id)
+    batched_data = torch.cat(data, dim=0)
+    batched_attention = torch.cat(attention, dim=0)
     batched_graph = dgl.batch(graphs)
-    return batched_ids, batched_labels, batched_words, batched_masks, \
-           batched_sentence_id, batched_trigger_id, batched_graph
+    return batched_ids, batched_labels, batched_data, batched_attention, batched_graph
 
 
 def get_data(opt, label2idx, index):
-    trainset = BERTDGLREDataset(opt.data_path, opt.data_save_path, label2idx,
-                                index, dataset_type='train', bert_path=opt.bert_path)
+    trainset = MyDataset(opt.data_path, opt.data_save_path, label2idx,
+                         index, dataset_type='train', bert_path=opt.bert_path)
     trainloader = DataLoader(trainset, batch_size=opt.batch_size,
                              shuffle=True,
                              collate_fn=collate)
-    testset = BERTDGLREDataset(opt.data_path, opt.data_save_path, label2idx,
-                                index, dataset_type='test', bert_path=opt.bert_path)
+    testset = MyDataset(opt.data_path, opt.data_save_path, label2idx,
+                        index, dataset_type='test', bert_path=opt.bert_path)
     testloader = DataLoader(testset, batch_size=opt.test_batch_size,
                             shuffle=False,
                             collate_fn=collate)
@@ -323,12 +440,14 @@ def get_data(opt, label2idx, index):
 
 
 if __name__ == '__main__':
-    index, label2idx = k_fold_split("../data/dlef_corpus/english.xml", 5)
-    train_set = BERTDGLREDataset('../data/dlef_corpus/english.xml', '../data/train.pkl', label2idx, index[0],
+    index, label2idx = k_fold_split("../data/dlef_corpus/train.xml", 5)
+    train_set = MyDataset('../data/dlef_corpus/train.xml', '../data/train.pkl', label2idx, index[0],
                                  dataset_type='train', bert_path="../../data/bert-base-uncased")
-    a, b, c, d, e, f, g = train_set.__getitem__(0)
+    a, b, c, d, e = train_set.__getitem__(1)
     dataloader = DataLoader(train_set, batch_size=2, shuffle=False, collate_fn=collate)
-    for a, b, c, d, e, f, g in dataloader:
-        g_unbatch = dgl.unbatch(g)
+    for h, i, j, k, l in dataloader:
+        g_unbatch = dgl.unbatch(l)
+        n = g_unbatch[0].number_of_nodes('node')
+        o = j[n]
         print("hello")
     print("end")

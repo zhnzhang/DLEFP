@@ -7,7 +7,7 @@ def get_train_args():
     parser.add_argument('--model_path', type=str, default="../checkpoint/model")
     parser.add_argument('--output_path', type=str, default="../result/output")
 
-    parser.add_argument('--batch_size', type=int, default=8)
+    parser.add_argument('--batch_size', type=int, default=2)
     parser.add_argument('--test_batch_size', type=int, default=50)
     parser.add_argument('--nepoch', type=int, default=30)
     parser.add_argument('--lr', type=float, default=5e-5)
@@ -23,7 +23,7 @@ def get_train_args():
     parser.add_argument('--dropout', type=float, default=0)
     parser.add_argument('--linear_dim', type=int, default=300)
 
-    parser.add_argument('--type_embed_dim', type=int, default=20)
+    parser.add_argument('--type_embed_dim', type=int, default=0)
 
     # BERT
     parser.add_argument('--bert_hid_size', type=int, default=768)
@@ -31,7 +31,7 @@ def get_train_args():
     parser.add_argument('--bert_fix', default=False, action='store_true')
 
     parser.add_argument('--data_path', type=str, default='../../../data/dlef_corpus/english.xml')
-    parser.add_argument('--data_save_path', type=str, default='../../../data/english.pkl')
+    parser.add_argument('--data_save_path', type=str, default='../../../data/english_sent.pkl')
 
     parser.add_argument('--k_fold', type=int, default=10)
 
