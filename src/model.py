@@ -87,7 +87,7 @@ class GAIN_BERT(nn.Module):
             document_features.append(output_feature[idx])
         document_feature = torch.stack(document_features, dim=0)
 
-        assert document_feature.size()[0] == self.config.batch_size, "batch size inconsistent"
+        # assert document_feature.size()[0] == self.config.batch_size, "batch size inconsistent: " + params['ids'][0]
 
         # classification
         predictions = self.predict(document_feature)
