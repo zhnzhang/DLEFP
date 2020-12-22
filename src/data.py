@@ -236,6 +236,8 @@ class MyDataset(Dataset):
                     for t in sent.itertext():
                         s += t
                     s = s.replace('-EOP- ', '').lower()
+                    if len(s.split()) <= 3:
+                        continue
 
                     data = tok(s, return_tensors='pt', padding='max_length', truncation=True, max_length=150)
                     sent_info = {'sent_id': len(sentence_list),

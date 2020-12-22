@@ -10,7 +10,7 @@ def get_train_args():
     parser.add_argument('--batch_size', type=int, default=1)
     parser.add_argument('--test_batch_size', type=int, default=50)
     parser.add_argument('--nepoch', type=int, default=30)
-    parser.add_argument('--lr', type=float, default=5e-5)
+    parser.add_argument('--lr', type=float, default=1e-5)
     parser.add_argument('--gpu', type=bool, default=True, help='是否使用gpu')
     parser.add_argument('--num_workers', type=int, default=2, help='dataloader使用的线程数量')
 
@@ -19,7 +19,7 @@ def get_train_args():
     parser.add_argument('--gcn_hid_dim', type=int, default=300)
     parser.add_argument('--gcn_out_dim', type=int, default=300)
 
-    parser.add_argument('--activation', type=str, default="relu")
+    parser.add_argument('--activation', type=str, default="tanh")
     parser.add_argument('--dropout', type=float, default=0)
     parser.add_argument('--linear_dim', type=int, default=300)
 
@@ -31,7 +31,7 @@ def get_train_args():
     parser.add_argument('--bert_fix', default=False, action='store_true')
 
     parser.add_argument('--data_path', type=str, default='../../../data/dlef_corpus/english.xml')
-    parser.add_argument('--data_save_path', type=str, default='../../../data/english_sent.pkl')
+    parser.add_argument('--data_save_path', type=str, default='../../../data/english_doc_new.pkl')
 
     parser.add_argument('--k_fold', type=int, default=10)
 
