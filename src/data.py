@@ -300,16 +300,10 @@ class MyDataset(Dataset):
             d[('node', 'title', 'node')].append((i, 0))
 
         # add trigger edges
-        for i in range(len(sentence_list)):
-            u = sentence_list[i]
-            if u['trigger'] == False:
+        for s in sentence_list:
+            if s['trigger'] == False:
                 continue
-            for j in range(i + 1, len(sentence_list)):
-                v = sentence_list[j]
-                if v['trigger'] == False:
-                    continue
-                d[('node', 'trigger', 'node')].append((u['sent_id'], v['sent_id']))
-                d[('node', 'trigger', 'node')].append((v['sent_id'], u['sent_id']))
+            d[('node', 'trigger', 'node')].append((s['sent_id'], 0))  # uni-direction
 
         graph = dgl.heterograph(d)
         # print(graph)
@@ -440,8 +434,8 @@ def get_data(opt, label2idx, index):
 
 
 if __name__ == '__main__':
-    index, label2idx = k_fold_split("../data/dlef_corpus/train.xml", 5)
-    train_set = MyDataset('../data/dlef_corpus/train.xml', '../data/train.pkl', label2idx, index[0],
+    index, label2idx = k_fold_split("../data/dlef_corpus/english.xml", 5)
+    train_set = MyDataset('../data/dlef_corpus/english.xml', '../data/train.pkl', label2idx, index[0],
                                  dataset_type='train', bert_path="../../data/bert-base-uncased")
     a, b, c, d, e = train_set.__getitem__(1)
     dataloader = DataLoader(train_set, batch_size=2, shuffle=False, collate_fn=collate)
