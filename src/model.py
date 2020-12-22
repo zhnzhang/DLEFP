@@ -38,7 +38,7 @@ class GAIN_BERT(nn.Module):
                                                  num_bases=len(rel_name_lists), activation=self.activation,
                                                  self_loop=True, dropout=self.dropout))
 
-        self.bank_size = self.gcn_in_dim + self.gcn_hid_dim + self.gcn_out_dim
+        self.bank_size = self.gcn_out_dim
         self.linear_dim = config.linear_dim
         '''self.predict = nn.Sequential(
             nn.Linear(self.bank_size, self.linear_dim),
@@ -71,13 +71,13 @@ class GAIN_BERT(nn.Module):
         graphs = dgl.unbatch(graph_big)
 
         assert features.size()[0] == graph_big.number_of_nodes('node'), "number of nodes inconsistent"
-        output_features = [features]
+        # output_features = [features]
 
         for GCN_layer in self.GCN_layers:
             features = GCN_layer(graph_big, {"node": features})["node"]  # [total_node_nums, gcn_dim]
-            output_features.append(features)
+            # output_features.append(features)
 
-        output_feature = torch.cat(output_features, dim=-1)
+        output_feature = features  # torch.cat(output_features, dim=-1)
         assert output_feature.size()[0] == graph_big.number_of_nodes('node'), "number of nodes inconsistent"
 
         idx = 0

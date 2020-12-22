@@ -245,6 +245,8 @@ class MyDataset(Dataset):
                     if len(sent) > 0:
                         sent_info['trigger'] = True
                     sentence_list.append(sent_info)
+                    if len(sentence_list) >= 32:
+                        break
 
                 # construct graph
                 graph = self.create_graph(sentence_list)

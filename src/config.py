@@ -7,7 +7,7 @@ def get_train_args():
     parser.add_argument('--model_path', type=str, default="../checkpoint/model")
     parser.add_argument('--output_path', type=str, default="../result/output")
 
-    parser.add_argument('--batch_size', type=int, default=2)
+    parser.add_argument('--batch_size', type=int, default=1)
     parser.add_argument('--test_batch_size', type=int, default=50)
     parser.add_argument('--nepoch', type=int, default=30)
     parser.add_argument('--lr', type=float, default=5e-5)
@@ -16,8 +16,8 @@ def get_train_args():
 
     # gcn
     parser.add_argument('--gcn_layers', type=int, default=2)
-    parser.add_argument('--gcn_hid_dim', type=int, default=768)
-    parser.add_argument('--gcn_out_dim', type=int, default=768)
+    parser.add_argument('--gcn_hid_dim', type=int, default=300)
+    parser.add_argument('--gcn_out_dim', type=int, default=300)
 
     parser.add_argument('--activation', type=str, default="relu")
     parser.add_argument('--dropout', type=float, default=0)
