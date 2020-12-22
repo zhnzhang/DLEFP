@@ -256,7 +256,7 @@ class MyDataset(Dataset):
                             s += t
                         s = s.replace('-EOP- ', '').lower()
                         trigger += s + ' '
-                trigger_data = tok(trigger, return_tensors='pt', padding=True,
+                trigger_data = tok(trigger, return_tensors='pt', padding='max_length',
                                    truncation=True, max_length=512)
 
                 # construct graph
@@ -268,6 +268,7 @@ class MyDataset(Dataset):
                     'ids': id,
                     'labels': label,
                     'triggers': trigger_data['input_ids'],
+                    'trigger_masks': trigger_data['attention_mask'],
                     'sentences': sentence_list,
                     'graphs': graph
                 })
@@ -295,6 +296,7 @@ class MyDataset(Dataset):
         return self.data[idx]['ids'], \
                torch.tensor(self.data[idx]['labels'], dtype=torch.long), \
                self.data[idx]['triggers'], \
+               self.data[idx]['trigger_masks'], \
                data, \
                attention, \
                self.data[idx]['graphs']
@@ -425,14 +427,15 @@ class Bert():
 
 
 def collate(samples):
-    ids, labels, trigger, data, attention, graphs = map(list, zip(*samples))
+    ids, labels, trigger, trigger_mask, data, attention, graphs = map(list, zip(*samples))
     batched_ids = tuple(ids)
     batched_labels = torch.tensor(labels)
     batched_triggers = torch.cat(trigger, dim=0)
+    batched_trigger_mask = torch.cat(trigger_mask, dim=0)
     batched_data = torch.cat(data, dim=0)
     batched_attention = torch.cat(attention, dim=0)
     batched_graph = dgl.batch(graphs)
-    return batched_ids, batched_labels, batched_triggers, \
+    return batched_ids, batched_labels, batched_triggers, batched_trigger_mask, \
            batched_data, batched_attention, batched_graph
 
 

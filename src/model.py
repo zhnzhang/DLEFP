@@ -63,7 +63,9 @@ class GAIN_BERT(nn.Module):
         ht_pair_distance: [batch_size, h_t_limit]
         '''
         triggers = params['triggers']
-        _, document_cls = self.bert(triggers)
+        trigger_masks = params['trigger_masks']
+        bsz = triggers.size()[0]
+        _, document_cls = self.bert(input_ids=triggers, attention_mask=trigger_masks)
 
         words = params['words']  # [bsz, seq_len]
         masks = params['masks']  # [bsz, seq_len]
@@ -73,7 +75,16 @@ class GAIN_BERT(nn.Module):
         graph_big = params['graphs']
         graphs = dgl.unbatch(graph_big)
 
-        features = torch.cat((document_cls, sentence_cls), dim=0)
+        assert len(graphs) == bsz, "batch size inconsistent"
+
+        split_sizes = []
+        for i in range(bsz):
+            split_sizes.append(graphs[i].number_of_nodes('node') - 1)
+        feature_list = list(torch.split(sentence_cls, split_sizes, dim=0))
+
+        for i in range(bsz):
+            feature_list[i] = torch.cat((document_cls[i].unsqueeze(0), feature_list[i]), dim=0)
+        features = torch.cat(feature_list, dim=0)
         assert features.size()[0] == graph_big.number_of_nodes('node'), "number of nodes inconsistent"
         # output_features = [features]
 
@@ -90,8 +101,6 @@ class GAIN_BERT(nn.Module):
             idx += graphs[i].number_of_nodes('node')
             document_features.append(output_feature[idx])
         document_feature = torch.stack(document_features, dim=0)
-
-        # assert document_feature.size()[0] == self.config.batch_size, "batch size inconsistent: " + params['ids'][0]
 
         # classification
         predictions = self.predict(document_feature)
