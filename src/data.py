@@ -245,17 +245,29 @@ class MyDataset(Dataset):
                     if len(sent) > 0:
                         sent_info['trigger'] = True
                     sentence_list.append(sent_info)
-                    if len(sentence_list) >= 32:
+                    if len(sentence_list) >= 35:
                         break
+
+                trigger = ''
+                for sent in doc:
+                    if len(sent) > 0:
+                        s = ''
+                        for t in sent.itertext():
+                            s += t
+                        s = s.replace('-EOP- ', '').lower()
+                        trigger += s + ' '
+                trigger_data = tok(trigger, return_tensors='pt', padding=True,
+                                   truncation=True, max_length=512)
 
                 # construct graph
                 graph = self.create_graph(sentence_list)
 
-                assert graph.number_of_nodes() == len(sentence_list)
+                assert graph.number_of_nodes() == len(sentence_list) + 1
 
                 self.document_data.append({
                     'ids': id,
                     'labels': label,
+                    'triggers': trigger_data['input_ids'],
                     'sentences': sentence_list,
                     'graphs': graph
                 })
@@ -282,6 +294,7 @@ class MyDataset(Dataset):
         attention = torch.cat(attention_list, dim=0)
         return self.data[idx]['ids'], \
                torch.tensor(self.data[idx]['labels'], dtype=torch.long), \
+               self.data[idx]['triggers'], \
                data, \
                attention, \
                self.data[idx]['graphs']
@@ -292,20 +305,20 @@ class MyDataset(Dataset):
         d = defaultdict(list)
 
         # add neighbor edges
-        for i in range(len(sentence_list) - 1):
+        for i in range(1, len(sentence_list)):
             d[('node', 'neighbor', 'node')].append((i, i + 1))
             d[('node', 'neighbor', 'node')].append((i + 1, i))
 
-        # add title edges
-        for i in range(1, len(sentence_list)):
-            d[('node', 'title', 'node')].append((0, i))
-            d[('node', 'title', 'node')].append((i, 0))
+        # add global edges
+        for i in range(1, len(sentence_list) + 1):
+            d[('node', 'global', 'node')].append((0, i))
+            d[('node', 'global', 'node')].append((i, 0))
 
         # add trigger edges
         for s in sentence_list:
             if s['trigger'] == False:
                 continue
-            d[('node', 'trigger', 'node')].append((s['sent_id'], 0))  # uni-direction
+            d[('node', 'trigger', 'node')].append((s['sent_id'] + 1, 0))  # uni-direction
 
         graph = dgl.heterograph(d)
         # print(graph)
@@ -412,13 +425,15 @@ class Bert():
 
 
 def collate(samples):
-    ids, labels, data, attention, graphs = map(list, zip(*samples))
+    ids, labels, trigger, data, attention, graphs = map(list, zip(*samples))
     batched_ids = tuple(ids)
     batched_labels = torch.tensor(labels)
+    batched_triggers = torch.cat(trigger, dim=0)
     batched_data = torch.cat(data, dim=0)
     batched_attention = torch.cat(attention, dim=0)
     batched_graph = dgl.batch(graphs)
-    return batched_ids, batched_labels, batched_data, batched_attention, batched_graph
+    return batched_ids, batched_labels, batched_triggers, \
+           batched_data, batched_attention, batched_graph
 
 
 def get_data(opt, label2idx, index):
@@ -436,14 +451,14 @@ def get_data(opt, label2idx, index):
 
 
 if __name__ == '__main__':
-    index, label2idx = k_fold_split("../data/dlef_corpus/english.xml", 5)
-    train_set = MyDataset('../data/dlef_corpus/english.xml', '../data/train.pkl', label2idx, index[0],
+    index, label2idx = k_fold_split("../data/dlef_corpus/train.xml", 5)
+    train_set = MyDataset('../data/dlef_corpus/train.xml', '../data/train.pkl', label2idx, index[0],
                                  dataset_type='train', bert_path="../../data/bert-base-uncased")
-    a, b, c, d, e = train_set.__getitem__(1)
-    dataloader = DataLoader(train_set, batch_size=2, shuffle=False, collate_fn=collate)
-    for h, i, j, k, l in dataloader:
-        g_unbatch = dgl.unbatch(l)
+    a, b, c, d, e, f = train_set.__getitem__(1)
+    dataloader = DataLoader(train_set, batch_size=1, shuffle=False, collate_fn=collate)
+    for h, i, j, k, l, m in dataloader:
+        g_unbatch = dgl.unbatch(m)
         n = g_unbatch[0].number_of_nodes('node')
-        o = j[n]
+        o = k[n]
         print("hello")
     print("end")

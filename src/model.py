@@ -29,7 +29,7 @@ class GAIN_BERT(nn.Module):
         self.gcn_out_dim = config.gcn_out_dim
         self.dropout = config.dropout
 
-        rel_name_lists = ['neighbor', 'title', 'trigger']
+        rel_name_lists = ['neighbor', 'global', 'trigger']
         self.GCN_layers = nn.ModuleList()
         self.GCN_layers.append(RelGraphConvLayer(self.gcn_in_dim, self.gcn_hid_dim, rel_name_lists,
                                                  num_bases=len(rel_name_lists), activation=self.activation,
@@ -62,14 +62,18 @@ class GAIN_BERT(nn.Module):
         h_t_pairs: [batch_size, h_t_limit, 2]
         ht_pair_distance: [batch_size, h_t_limit]
         '''
+        triggers = params['triggers']
+        _, document_cls = self.bert(triggers)
+
         words = params['words']  # [bsz, seq_len]
         masks = params['masks']  # [bsz, seq_len]
-        encoder_outputs, features = self.bert(input_ids=words, attention_mask=masks)  # sentence_cls: [bsz,
+        _, sentence_cls = self.bert(input_ids=words, attention_mask=masks)  # sentence_cls: [bsz,
         # bert_dim]
 
         graph_big = params['graphs']
         graphs = dgl.unbatch(graph_big)
 
+        features = torch.cat((document_cls, sentence_cls), dim=0)
         assert features.size()[0] == graph_big.number_of_nodes('node'), "number of nodes inconsistent"
         # output_features = [features]
 

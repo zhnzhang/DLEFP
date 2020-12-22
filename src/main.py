@@ -16,8 +16,9 @@ def train(model, trainloader, optimizer, opt):
     # start_time = time.time()
 
     loss_list = []
-    for batch_idx, (ids, labels, words, masks, graphs) in enumerate(trainloader):
+    for batch_idx, (ids, labels, triggers, words, masks, graphs) in enumerate(trainloader):
         if opt.gpu:
+            triggers = triggers.cuda()
             words = words.cuda()
             masks = masks.cuda()
             graphs = graphs.to('cuda')
@@ -26,6 +27,7 @@ def train(model, trainloader, optimizer, opt):
         optimizer.zero_grad()
 
         logit = model(ids=ids,
+                      triggers=triggers,
                       words=words,
                       masks=masks,
                       graphs=graphs)
@@ -49,14 +51,16 @@ def test(model, testloader, opt, filepath=None):
     y_true = []
     y_pred = []
     with torch.no_grad():
-        for batch_idx, (ids, labels, words, masks, graphs) in enumerate(testloader):
+        for batch_idx, (ids, labels, triggers, words, masks, graphs) in enumerate(testloader):
             if opt.gpu:
+                triggers = triggers.cuda()
                 words = words.cuda()
                 masks = masks.cuda()
                 graphs = graphs.to('cuda')
                 labels = labels.cuda()
 
             logit = model(ids=ids,
+                          triggers=triggers,
                           words=words,
                           masks=masks,
                           graphs=graphs)
