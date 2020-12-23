@@ -31,7 +31,7 @@ def get_train_args():
     parser.add_argument('--bert_fix', default=False, action='store_true')
 
     parser.add_argument('--data_path', type=str, default='../../../data/dlef_corpus/english.xml')
-    parser.add_argument('--data_save_path', type=str, default='../../../data/english_doc_new.pkl')
+    parser.add_argument('--data_save_path', type=str, default='../english_doc.pkl')
 
     parser.add_argument('--k_fold', type=int, default=10)
 

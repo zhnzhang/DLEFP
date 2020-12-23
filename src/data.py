@@ -319,15 +319,16 @@ class MyDataset(Dataset):
             d[('node', 'global', 'node')].append((i, 0))
 
         # add trigger edges
+        '''
         for s in sentence_list:
             if s['trigger'] == False:
                 continue
-            d[('node', 'trigger', 'node')].append((s['sent_id'] + 1, 0))  # uni-direction
+            d[('node', 'trigger', 'node')].append((s['sent_id'] + 1, 0))  # uni-direction'''
 
         graph = dgl.heterograph(d)
         # print(graph)
 
-        assert len(graph.etypes) == 3, "etypes wrong"
+        assert len(graph.etypes) == 2, "etypes wrong"
 
         return graph
 
