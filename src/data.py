@@ -322,11 +322,14 @@ class MyDataset(Dataset):
         trigger_word_list = self.data[idx]['trigger_words']
         sent_idx_list = []
         trigger_word_idx_list = []
+        trigger_label_list = []
         for t in trigger_word_list:
             sent_idx_list.append(t['sent_id'])
             trigger_word_idx_list.append(t['idx'])
-        sent_idx = torch.tensor(sent_idx_list)
-        trigger_word_idx = torch.stack(trigger_word_idx_list, dim=0)
+            trigger_label_list.append(t['value'])
+        sent_idx = torch.tensor(sent_idx_list).cuda()
+        trigger_word_idx = torch.stack(trigger_word_idx_list, dim=0).cuda()
+        trigger_label = torch.tensor(trigger_label_list)
 
         return self.data[idx]['ids'], \
                torch.tensor(self.data[idx]['labels'], dtype=torch.long), \
@@ -336,6 +339,7 @@ class MyDataset(Dataset):
                attention, \
                sent_idx, \
                trigger_word_idx, \
+               trigger_label, \
                self.data[idx]['graphs']
         # return self.data[idx]['graphs'], torch.tensor(self.data[idx]['labels'], dtype=torch.long)
 
@@ -477,19 +481,22 @@ class Bert():
 
 def collate(samples):
     # only consider batch_size=1
-    ids, labels, trigger, trigger_mask, data, attention, sent_idx, trigger_word_idx, graphs = map(list, zip(*samples))
-    batched_ids = tuple(ids)
-    batched_labels = torch.tensor(labels)
+    id, label, trigger, trigger_mask, data, attention, \
+    sent_idx, trigger_word_idx, trigger_label, graph = map(list, zip(*samples))
+
+    batched_ids = tuple(id)
+    batched_labels = torch.tensor(label)
     batched_triggers = torch.cat(trigger, dim=0)
     batched_trigger_mask = torch.cat(trigger_mask, dim=0)
     batched_data = torch.cat(data, dim=0)
     batched_attention = torch.cat(attention, dim=0)
     batched_sent_idx = sent_idx
     batched_trigger_word_idx = trigger_word_idx
-    batched_graph = dgl.batch(graphs)
+    batched_trigger_labels = torch.cat(trigger_label, dim=0)
+    batched_graph = dgl.batch(graph)
     return batched_ids, batched_labels, batched_triggers, batched_trigger_mask, \
            batched_data, batched_attention, \
-           batched_sent_idx, batched_trigger_word_idx, \
+           batched_sent_idx, batched_trigger_word_idx, batched_trigger_labels, \
            batched_graph
 
 
@@ -511,10 +518,10 @@ if __name__ == '__main__':
     index, label2idx = k_fold_split("../data/dlef_corpus/train.xml", 5)
     train_set = MyDataset('../data/dlef_corpus/train.xml', '../data/train.pkl', label2idx, index[0],
                                  dataset_type='train', bert_path="../../data/bert-base-uncased")
-    a0, b0, c0, d0, e0, f0, g0, h0, i0 = train_set.__getitem__(1)
+    a0, b0, c0, d0, e0, f0, g0, h0, i0, j0 = train_set.__getitem__(1)
     dataloader = DataLoader(train_set, batch_size=1, shuffle=False, collate_fn=collate)
-    for a1, b1, c1, d1, e1, f1, g1, h1, i1 in dataloader:
-        g_unbatch = dgl.unbatch(i1)
+    for a1, b1, c1, d1, e1, f1, g1, h1, i1, j1 in dataloader:
+        g_unbatch = dgl.unbatch(j1)
         n = g_unbatch[0].number_of_nodes('node')
         print("hello")
     print("end")

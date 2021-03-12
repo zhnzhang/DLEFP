@@ -47,6 +47,7 @@ class GAIN_BERT(nn.Module):
             nn.Linear(self.linear_dim, num_classes),
         )'''
         self.predict = nn.Linear(self.bank_size, num_classes)
+        self.trigger_predict = nn.Linear(self.bank_size, num_classes)
 
     def forward(self, **params):
         '''
@@ -108,15 +109,22 @@ class GAIN_BERT(nn.Module):
         assert output_feature.size()[0] == graph_big.number_of_nodes('node'), "number of nodes inconsistent"
 
         idx = 0
-        document_features = [output_feature[idx]]
-        for i in range(len(graphs) - 1):
-            idx += graphs[i].number_of_nodes('node')
+        document_features = []
+        trigger_features = []
+        for i in range(len(graphs)):
             document_features.append(output_feature[idx])
+
+            trigger_start = idx + 1 + split_sizes[i]
+            idx += graphs[i].number_of_nodes('node')
+
+            trigger_features.append(output_feature[trigger_start:idx])
         document_feature = torch.stack(document_features, dim=0)
+        trigger_feature = torch.cat(trigger_features, dim=0)
 
         # classification
         predictions = self.predict(document_feature)
-        return predictions
+        trigger_predictions = self.trigger_predict(trigger_feature)
+        return predictions, trigger_predictions
 
 
 class Attention(nn.Module):

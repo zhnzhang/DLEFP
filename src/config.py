@@ -14,6 +14,8 @@ def get_train_args():
     parser.add_argument('--gpu', type=bool, default=True, help='是否使用gpu')
     parser.add_argument('--num_workers', type=int, default=2, help='dataloader使用的线程数量')
 
+    parser.add_argument('--labmda', type=float, default=0.2)
+
     # gcn
     parser.add_argument('--gcn_layers', type=int, default=2)
     parser.add_argument('--gcn_hid_dim', type=int, default=768)
@@ -31,7 +33,7 @@ def get_train_args():
     parser.add_argument('--bert_fix', default=False, action='store_true')
 
     parser.add_argument('--data_path', type=str, default='../../../data/dlef_corpus/english.xml')
-    parser.add_argument('--data_save_path', type=str, default='../english_trigger.pkl')
+    parser.add_argument('--data_save_path', type=str, default='../english_aux.pkl')
 
     parser.add_argument('--k_fold', type=int, default=10)
 
