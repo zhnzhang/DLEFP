@@ -72,6 +72,9 @@ class GAIN_BERT(nn.Module):
         _, sentence_cls = self.bert(input_ids=words, attention_mask=masks)  # sentence_cls: [bsz,
         # bert_dim]
 
+        sent_idx = params['sent_idx']  # [trigger_num]
+        trigger_word_idx = params['trigger_word_idx']  # [trigger_num, seq_len]
+
         graph_big = params['graphs']
         graphs = dgl.unbatch(graph_big)
 

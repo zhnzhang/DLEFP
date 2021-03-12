@@ -16,12 +16,15 @@ def train(model, trainloader, optimizer, opt):
     # start_time = time.time()
 
     loss_list = []
-    for batch_idx, (ids, labels, triggers, trigger_masks, words, masks, graphs) in enumerate(trainloader):
+    for batch_idx, (ids, labels, triggers, trigger_masks, words, masks, sent_idx, trigger_word_idx, graphs) in \
+            enumerate(trainloader):
         if opt.gpu:
             triggers = triggers.cuda()
             trigger_masks = trigger_masks.cuda()
             words = words.cuda()
             masks = masks.cuda()
+            sent_idx = sent_idx.cuda()
+            trigger_word_idx = trigger_word_idx.cuda()
             graphs = graphs.to('cuda')
             labels = labels.cuda()
 
@@ -32,6 +35,8 @@ def train(model, trainloader, optimizer, opt):
                       trigger_masks=trigger_masks,
                       words=words,
                       masks=masks,
+                      sent_idx=sent_idx,
+                      trigger_word_idx=trigger_word_idx,
                       graphs=graphs)
         loss = nn.functional.cross_entropy(logit, labels)
 
@@ -53,12 +58,15 @@ def test(model, testloader, opt, filepath=None):
     y_true = []
     y_pred = []
     with torch.no_grad():
-        for batch_idx, (ids, labels, triggers, trigger_masks, words, masks, graphs) in enumerate(testloader):
+        for batch_idx, (ids, labels, triggers, trigger_masks, words, masks, sent_idx, trigger_word_idx, graphs) in \
+                enumerate(testloader):
             if opt.gpu:
                 triggers = triggers.cuda()
                 trigger_masks = trigger_masks.cuda()
                 words = words.cuda()
                 masks = masks.cuda()
+                sent_idx = sent_idx.cuda()
+                trigger_word_idx = trigger_word_idx.cuda()
                 graphs = graphs.to('cuda')
                 labels = labels.cuda()
 
@@ -67,6 +75,8 @@ def test(model, testloader, opt, filepath=None):
                           trigger_masks=trigger_masks,
                           words=words,
                           masks=masks,
+                          sent_idx=sent_idx,
+                          trigger_word_idx=trigger_word_idx,
                           graphs=graphs)
             _, predicted = torch.max(logit.data,1)
             correct += predicted.data.eq(labels.data).cpu().sum()

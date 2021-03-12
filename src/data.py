@@ -209,6 +209,7 @@ class MyDataset(Dataset):
         self.data = []
         self.document_data = None
         self.document_max_length = 512
+        self.sentence_max_length = 150
 
         print('Reading data from {}.'.format(src_file))
         if os.path.exists(save_file):
@@ -217,7 +218,7 @@ class MyDataset(Dataset):
                 self.document_data = info['data']
             print('load preprocessed data from {}.'.format(save_file))
         else:
-            # bert = Bert('bert-base-uncased', bert_path)
+            bert = Bert(bert_path)
             tok = BertTokenizer.from_pretrained(bert_path)
             self.document_data = []
 
@@ -229,6 +230,7 @@ class MyDataset(Dataset):
                 label = label2idx[doc.attrib['document_level_value']]
 
                 sentence_list = []
+                trigger_word_list = []
                 for sent in doc:
                     if sent.text == '-EOP- .':
                         continue
@@ -240,12 +242,32 @@ class MyDataset(Dataset):
                         continue
 
                     data = tok(s, return_tensors='pt', padding='max_length', truncation=True, max_length=150)
-                    sent_info = {'sent_id': len(sentence_list),
-                                 'trigger': False,
-                                 'data': data['input_ids'],
-                                 'attention': data['attention_mask']}
+                    s_token, s_mask, s_starts, s_subwords = bert.subword_tokenize_to_ids(s.split())
+                    assert 0 == (data['input_ids'] != s_token).sum()
+                    sent_info = {'trigger_num': 0,
+                                 'data': s_token,
+                                 'attention': s_mask}
                     if len(sent) > 0:
-                        sent_info['trigger'] = True
+                        # has triggers
+                        tmp = sent.text.lower() if sent.text is not None else ''
+                        for event in sent:
+                            pos = len(tmp.split())
+                            pos0 = s_starts[pos]
+                            pos1 = s_starts[pos + 1]
+                            if pos0 >= self.sentence_max_length - 1:
+                                break
+                            if pos1 >= self.sentence_max_length - 1:
+                                pos1 = self.sentence_max_length - 1
+
+                            trigger_word_idx = torch.zeros(self.sentence_max_length)
+                            trigger_word_idx[pos0:pos1] = 1.0 / (pos1 - pos0)
+
+                            trigger_word_list.append({'sent_id': len(sentence_list),
+                                                      'idx': trigger_word_idx,
+                                                      'value': label2idx[event.attrib['sentence_level_value']]})
+                            tmp += event.text.lower() + event.tail.lower()
+
+                            sent_info['trigger_num'] += 1
                     sentence_list.append(sent_info)
                     if len(sentence_list) >= 35:
                         break
@@ -262,9 +284,9 @@ class MyDataset(Dataset):
                                    truncation=True, max_length=512)
 
                 # construct graph
-                graph = self.create_graph(sentence_list)
+                graph = self.create_graph(sentence_list, trigger_word_list)
 
-                assert graph.number_of_nodes() == len(sentence_list) + 1
+                assert graph.number_of_nodes() == len(sentence_list) + len(trigger_word_list) + 1
 
                 self.document_data.append({
                     'ids': id,
@@ -272,6 +294,7 @@ class MyDataset(Dataset):
                     'triggers': trigger_data['input_ids'],
                     'trigger_masks': trigger_data['attention_mask'],
                     'sentences': sentence_list,
+                    'trigger_words': trigger_word_list,
                     'graphs': graph
                 })
 
@@ -295,40 +318,63 @@ class MyDataset(Dataset):
             attention_list.append(s['attention'])
         data = torch.cat(data_list, dim=0)
         attention = torch.cat(attention_list, dim=0)
+
+        trigger_word_list = self.data[idx]['trigger_words']
+        sent_idx_list = []
+        trigger_word_idx_list = []
+        for t in trigger_word_list:
+            sent_idx_list.append(t['sent_id'])
+            trigger_word_idx_list.append(t['idx'])
+        sent_idx = torch.tensor(sent_idx_list)
+        trigger_word_idx = torch.stack(trigger_word_idx_list, dim=0)
+
         return self.data[idx]['ids'], \
                torch.tensor(self.data[idx]['labels'], dtype=torch.long), \
                self.data[idx]['triggers'], \
                self.data[idx]['trigger_masks'], \
                data, \
                attention, \
+               sent_idx, \
+               trigger_word_idx, \
                self.data[idx]['graphs']
         # return self.data[idx]['graphs'], torch.tensor(self.data[idx]['labels'], dtype=torch.long)
 
-    def create_graph(self, sentence_list):
+    def create_graph(self, sentence_list, trigger_word_list):
 
         d = defaultdict(list)
+        sent_num = len(sentence_list)
+        trigger_num = len(trigger_word_list)
 
         # add neighbor edges
-        for i in range(1, len(sentence_list)):
+        for i in range(1, sent_num):
             d[('node', 'neighbor', 'node')].append((i, i + 1))
             d[('node', 'neighbor', 'node')].append((i + 1, i))
 
         # add global edges
-        for i in range(1, len(sentence_list) + 1):
+        for i in range(1, sent_num + 1):
             d[('node', 'global', 'node')].append((0, i))
             d[('node', 'global', 'node')].append((i, 0))
 
-        # add trigger edges
+        # add trigger-doc, trigger-sent edges
         '''
         for s in sentence_list:
             if s['trigger'] == False:
                 continue
             d[('node', 'trigger', 'node')].append((s['sent_id'] + 1, 0))  # uni-direction'''
+        for i in range(trigger_num):
+            j = i + sent_num + 1
+            # trigger-doc
+            d[('node', 'td', 'node')].append((0, j))
+            d[('node', 'td', 'node')].append((j, 0))
+
+            # trigger_sent
+            d[('node', 'ts', 'node')].append((j, trigger_word_list[i]['sent_id'] + 1))
+            d[('node', 'ts', 'node')].append((trigger_word_list[i]['sent_id'] + 1, j))
 
         graph = dgl.heterograph(d)
         # print(graph)
 
-        assert len(graph.etypes) == 2, "etypes wrong"
+        assert len(graph.etypes) == 4, "etypes wrong"
 
         return graph
 
@@ -338,12 +384,12 @@ class Bert():
     CLS = "[CLS]"
     SEP = "[SEP]"
 
-    def __init__(self, model_name, model_path=None):
+    def __init__(self, model_path=None):
         super().__init__()
-        self.model_name = model_name
-        print(model_path)
+        # self.model_name = model_name
+        # print(model_path)
         self.tokenizer = BertTokenizer.from_pretrained(model_path)
-        self.max_len = 512
+        self.max_len = 150
 
     def tokenize(self, text, masked_idxs=None):
         tokenized_text = self.tokenizer.tokenize(text)
@@ -400,9 +446,9 @@ class Bert():
         """
         subwords = list(map(self.tokenizer.tokenize, tokens))
         subword_lengths = list(map(len, subwords))
-        subwords = [self.CLS] + list(self.flatten(subwords))[:510] + [self.SEP]
+        subwords = [self.CLS] + list(self.flatten(subwords))[:148] + [self.SEP]
         token_start_idxs = 1 + np.cumsum([0] + subword_lengths[:-1])
-        token_start_idxs[token_start_idxs > 510] = 511
+        token_start_idxs[token_start_idxs > 148] = 149
         return subwords, token_start_idxs
 
     def subword_tokenize_to_ids(self, tokens):
@@ -422,7 +468,7 @@ class Bert():
         """
         subwords, token_start_idxs = self.subword_tokenize(tokens)
         subword_ids, mask = self.convert_tokens_to_ids(subwords)
-        return subword_ids[0], mask[0], token_start_idxs, subwords
+        return subword_ids, mask, token_start_idxs, subwords
 
     def segment_ids(self, segment1_len, segment2_len):
         ids = [0] * segment1_len + [1] * segment2_len
@@ -430,16 +476,21 @@ class Bert():
 
 
 def collate(samples):
-    ids, labels, trigger, trigger_mask, data, attention, graphs = map(list, zip(*samples))
+    # only consider batch_size=1
+    ids, labels, trigger, trigger_mask, data, attention, sent_idx, trigger_word_idx, graphs = map(list, zip(*samples))
     batched_ids = tuple(ids)
     batched_labels = torch.tensor(labels)
     batched_triggers = torch.cat(trigger, dim=0)
     batched_trigger_mask = torch.cat(trigger_mask, dim=0)
     batched_data = torch.cat(data, dim=0)
     batched_attention = torch.cat(attention, dim=0)
+    batched_sent_idx = torch.cat(sent_idx, dim=0)
+    batched_trigger_word_idx = torch.cat(trigger_word_idx, dim=0)
     batched_graph = dgl.batch(graphs)
     return batched_ids, batched_labels, batched_triggers, batched_trigger_mask, \
-           batched_data, batched_attention, batched_graph
+           batched_data, batched_attention, \
+           batched_sent_idx, batched_trigger_word_idx, \
+           batched_graph
 
 
 def get_data(opt, label2idx, index):
@@ -460,11 +511,10 @@ if __name__ == '__main__':
     index, label2idx = k_fold_split("../data/dlef_corpus/train.xml", 5)
     train_set = MyDataset('../data/dlef_corpus/train.xml', '../data/train.pkl', label2idx, index[0],
                                  dataset_type='train', bert_path="../../data/bert-base-uncased")
-    a, b, c, d, e, f = train_set.__getitem__(1)
+    a0, b0, c0, d0, e0, f0, g0, h0, i0 = train_set.__getitem__(1)
     dataloader = DataLoader(train_set, batch_size=1, shuffle=False, collate_fn=collate)
-    for h, i, j, k, l, m in dataloader:
-        g_unbatch = dgl.unbatch(m)
+    for a1, b1, c1, d1, e1, f1, g1, h1, i1 in dataloader:
+        g_unbatch = dgl.unbatch(i1)
         n = g_unbatch[0].number_of_nodes('node')
-        o = k[n]
         print("hello")
     print("end")
