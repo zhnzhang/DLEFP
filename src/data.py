@@ -484,8 +484,8 @@ def collate(samples):
     batched_trigger_mask = torch.cat(trigger_mask, dim=0)
     batched_data = torch.cat(data, dim=0)
     batched_attention = torch.cat(attention, dim=0)
-    batched_sent_idx = torch.cat(sent_idx, dim=0)
-    batched_trigger_word_idx = torch.cat(trigger_word_idx, dim=0)
+    batched_sent_idx = sent_idx
+    batched_trigger_word_idx = trigger_word_idx
     batched_graph = dgl.batch(graphs)
     return batched_ids, batched_labels, batched_triggers, batched_trigger_mask, \
            batched_data, batched_attention, \

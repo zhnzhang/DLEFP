@@ -29,7 +29,7 @@ class GAIN_BERT(nn.Module):
         self.gcn_out_dim = config.gcn_out_dim
         self.dropout = config.dropout
 
-        rel_name_lists = ['neighbor', 'global']
+        rel_name_lists = ['neighbor', 'global', 'td', 'ts']
         self.GCN_layers = nn.ModuleList()
         self.GCN_layers.append(RelGraphConvLayer(self.gcn_in_dim, self.gcn_hid_dim, rel_name_lists,
                                                  num_bases=len(rel_name_lists), activation=self.activation,
@@ -72,28 +72,31 @@ class GAIN_BERT(nn.Module):
         sentence_embed, sentence_cls = self.bert(input_ids=words, attention_mask=masks)  # sentence_cls: [bsz,
         # bert_dim], sentence_embed: [bsz (seq_num), seq_len, bert_dim]
 
-        sent_idx = params['sent_idx']  # [trigger_num]
-        trigger_word_idx = params['trigger_word_idx']  # [trigger_num, seq_len, 1]
-        # 1. extract sentences with triggers
-        t = sentence_embed.index_select(0, sent_idx)  # [trigger_num, seq_len, bert_dim]
-        # 2. extract trigger embeds
-        trigger_embed = torch.sum(trigger_word_idx.unsqueeze(-1) * t, dim=1)
+        sent_idx = params['sent_idx']  # bsz * [trigger_num]
+        trigger_word_idx = params['trigger_word_idx']  # bsz * [trigger_num, seq_len]
 
         graph_big = params['graphs']
         graphs = dgl.unbatch(graph_big)
 
         assert len(graphs) == bsz, "batch size inconsistent"
 
-        '''split_sizes = []
+        split_sizes = []
         for i in range(bsz):
-            split_sizes.append(graphs[i].number_of_nodes('node') - 1)
+            sentence_num = graphs[i].number_of_nodes('node') - 1 - sent_idx[i].shape[0]
+            split_sizes.append(sentence_num)
         feature_list = list(torch.split(sentence_cls, split_sizes, dim=0))
+        sentence_embed_list = list(torch.split(sentence_embed, split_sizes, dim=0))
 
         for i in range(bsz):
             feature_list[i] = torch.cat((document_cls[i].unsqueeze(0), feature_list[i]), dim=0)
-        features = torch.cat(feature_list, dim=0)'''
-        features = torch.cat((document_cls, sentence_cls), dim=0)
-        features = torch.cat((features, trigger_embed), dim=0)
+
+            # 1. extract sentences with triggers
+            t = sentence_embed_list[i].index_select(0, sent_idx[i])  # [trigger_num, seq_len, bert_dim]
+            # 2. extract trigger embeds
+            trigger_embed = torch.sum(trigger_word_idx[i].unsqueeze(-1) * t, dim=1)
+            feature_list[i] = torch.cat((feature_list[i], trigger_embed), dim=0)
+
+        features = torch.cat(feature_list, dim=0)
         assert features.size()[0] == graph_big.number_of_nodes('node'), "number of nodes inconsistent"
         output_features = [features]
 
