@@ -113,7 +113,7 @@ if __name__=='__main__':
     index, label2idx = k_fold_split(opt.data_path, opt.k_fold)
     f1_micro_list = []
     f1_macro_list = []
-    for i in range(1):
+    for i in range(opt.k_fold):
         model_path = opt.model_path + "_" + str(i) + ".pt"
         output_path = opt.output_path + "_" + str(i) + ".txt"
         trainloader, testloader = get_data(opt, label2idx, index[i])
@@ -157,7 +157,7 @@ if __name__=='__main__':
     ct_p = []
     ct_m = []
     ps_p = []
-    for i in range(1):
+    for i in range(opt.k_fold):
         filename = opt.output_path + "_" + str(i) + ".txt"
         y_true = []
         y_pred = []
