@@ -1,4 +1,5 @@
 import os
+import re
 import pickle
 from collections import defaultdict
 import xml.etree.ElementTree as ET
@@ -231,33 +232,48 @@ class MyDataset(Dataset):
 
                 sentence_list = []
                 trigger_word_list = []
+                flag = False
                 for sent in doc:
-                    if sent.text == '-EOP- .':
-                        continue
-                    s = ''
+                    if sent.text == '-EOP-.' or sent.text == '。':
+                        continue  # 去掉无意义的句子，包括"-EOP."和"。"
+
+                    s = ''  # 一个句子
                     for t in sent.itertext():
                         s += t
-                    s = s.replace('-EOP- ', '').lower()
-                    if len(s.split()) <= 3:
-                        continue
+                    s = s.replace('-EOP-.', '。').lower()
+
+                    if re.match(r'\d{4}\D\d{2}\D\d{2}\D\d{2}:\d{2}\D$', s) is not None:
+                        flag = True
+                        continue  # 去掉日期
+                    elif flag:
+                        flag = False
+                        if len(sent) == 0:
+                            continue  # 去掉不含主题事件的日期的下一行
+                        # print(s)
+                    if len(s) <= 4:
+                        continue  # 去掉少于4个字的句子
 
                     data = tok(s, return_tensors='pt', padding='max_length', truncation=True, max_length=150)
-                    s_token, s_mask, s_starts, s_subwords = bert.subword_tokenize_to_ids(s.split())
-                    assert 0 == (data['input_ids'] != s_token).sum()
+                    # 中文BERT按字分词
+                    # s_token, s_mask, s_starts, s_subwords = bert.subword_tokenize_to_ids(s.split())
+                    # assert 0 == (data['input_ids'] != s_token).sum()
                     sent_info = {'trigger_num': 0,
-                                 'data': s_token,
-                                 'attention': s_mask}
+                                 'data': data['input_ids'],
+                                 'attention': data['attention_mask']}
                     if len(sent) > 0:
                         # has triggers
                         tmp = sent.text.lower() if sent.text is not None else ''
                         for event in sent:
-                            pos = len(tmp.split())
-                            pos0 = s_starts[pos]
-                            pos1 = s_starts[pos + 1]
+                            tmp_subwords = tok.tokenize(tmp)
+                            trigger_subwords = tok.tokenize(event.text.lower())
+                            pos0 = len(tmp_subwords) + 1
+                            pos1 = pos0 + len(trigger_subwords)
                             if pos0 >= self.sentence_max_length - 1:
                                 break
                             if pos1 >= self.sentence_max_length - 1:
                                 pos1 = self.sentence_max_length - 1
+                            else:
+                                assert tok.convert_ids_to_tokens(data['input_ids'][0, pos0:pos1]) == trigger_subwords
 
                             trigger_word_idx = torch.zeros(self.sentence_max_length)
                             trigger_word_idx[pos0:pos1] = 1.0 / (pos1 - pos0)
@@ -265,7 +281,9 @@ class MyDataset(Dataset):
                             trigger_word_list.append({'sent_id': len(sentence_list),
                                                       'idx': trigger_word_idx,
                                                       'value': label2idx[event.attrib['sentence_level_value']]})
-                            tmp += event.text.lower() + event.tail.lower()
+                            tmp += event.text.lower()
+                            if event.tail is not None:
+                                tmp += event.tail.lower()
 
                             sent_info['trigger_num'] += 1
                     sentence_list.append(sent_info)
@@ -278,8 +296,8 @@ class MyDataset(Dataset):
                         s = ''
                         for t in sent.itertext():
                             s += t
-                        s = s.replace('-EOP- ', '').lower()
-                        trigger += s + ' '
+                        s = s.replace('-EOP-.', '。').lower()
+                        trigger += s
                 trigger_data = tok(trigger, return_tensors='pt', padding='max_length',
                                    truncation=True, max_length=512)
 
@@ -515,9 +533,9 @@ def get_data(opt, label2idx, index):
 
 
 if __name__ == '__main__':
-    index, label2idx = k_fold_split("../data/dlef_corpus/train.xml", 5)
-    train_set = MyDataset('../data/dlef_corpus/train.xml', '../data/train.pkl', label2idx, index[0],
-                                 dataset_type='train', bert_path="../../data/bert-base-uncased")
+    index, label2idx = k_fold_split("../data/dlef_corpus/chinese.xml", 10)
+    train_set = MyDataset('../data/dlef_corpus/chinese.xml', '../data/train_chinese.pkl', label2idx, index[0],
+                                 dataset_type='train', bert_path="../../data/bert-base-chinese")
     a0, b0, c0, d0, e0, f0, g0, h0, i0, j0 = train_set.__getitem__(1)
     dataloader = DataLoader(train_set, batch_size=1, shuffle=False, collate_fn=collate)
     for a1, b1, c1, d1, e1, f1, g1, h1, i1, j1 in dataloader:
