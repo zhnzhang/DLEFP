@@ -232,6 +232,190 @@ class MyDataset(Dataset):
 
                 sentence_list = []
                 trigger_word_list = []
+                for sent in doc:
+                    if sent.text == '-EOP- .':
+                        continue
+                    s = ''
+                    for t in sent.itertext():
+                        s += t
+                    s = s.replace('-EOP- ', '').lower()
+                    if len(s.split()) <= 3:
+                        continue
+
+                    data = tok(s, return_tensors='pt', padding='max_length', truncation=True, max_length=150)
+                    s_token, s_mask, s_starts, s_subwords = bert.subword_tokenize_to_ids(s.split())
+                    assert 0 == (data['input_ids'] != s_token).sum()
+                    sent_info = {'trigger_num': 0,
+                                 'data': s_token,
+                                 'attention': s_mask}
+                    if len(sent) > 0:
+                        # has triggers
+                        tmp = sent.text.lower() if sent.text is not None else ''
+                        for event in sent:
+                            pos = len(tmp.split())
+                            pos0 = s_starts[pos]
+                            pos1 = s_starts[pos + 1]
+                            if pos0 >= self.sentence_max_length - 1:
+                                break
+                            if pos1 >= self.sentence_max_length - 1:
+                                pos1 = self.sentence_max_length - 1
+
+                            trigger_word_idx = torch.zeros(self.sentence_max_length)
+                            trigger_word_idx[pos0:pos1] = 1.0 / (pos1 - pos0)
+
+                            trigger_word_list.append({'sent_id': len(sentence_list),
+                                                      'idx': trigger_word_idx,
+                                                      'value': label2idx[event.attrib['sentence_level_value']]})
+                            tmp += event.text.lower() + event.tail.lower()
+
+                            sent_info['trigger_num'] += 1
+                    sentence_list.append(sent_info)
+                    if len(sentence_list) >= 35:
+                        break
+
+                trigger = ''
+                for sent in doc:
+                    if len(sent) > 0:
+                        s = ''
+                        for t in sent.itertext():
+                            s += t
+                        s = s.replace('-EOP- ', '').lower()
+                        trigger += s + ' '
+                trigger_data = tok(trigger, return_tensors='pt', padding='max_length',
+                                   truncation=True, max_length=512)
+
+                # construct graph
+                graph = self.create_graph(sentence_list, trigger_word_list)
+
+                assert graph.number_of_nodes() == len(sentence_list) + len(trigger_word_list) + 1
+
+                self.document_data.append({
+                    'ids': id,
+                    'labels': label,
+                    'triggers': trigger_data['input_ids'],
+                    'trigger_masks': trigger_data['attention_mask'],
+                    'sentences': sentence_list,
+                    'trigger_words': trigger_word_list,
+                    'graphs': graph
+                })
+
+            # save data
+            with open(file=save_file, mode='wb') as fw:
+                pickle.dump({'data': self.document_data}, fw)
+            print('finish reading {} and save preprocessed data to {}.'.format(src_file, save_file))
+
+        for i in index[dataset_type]:
+            self.data.append(self.document_data[i])
+
+    def __len__(self):
+        return len(self.data)
+
+    def __getitem__(self, idx):
+        sentence_list = self.data[idx]['sentences']
+        data_list = []
+        attention_list = []
+        for s in sentence_list:
+            data_list.append(s['data'])
+            attention_list.append(s['attention'])
+        data = torch.cat(data_list, dim=0)
+        attention = torch.cat(attention_list, dim=0)
+
+        trigger_word_list = self.data[idx]['trigger_words']
+        sent_idx_list = []
+        trigger_word_idx_list = []
+        trigger_label_list = []
+        for t in trigger_word_list:
+            sent_idx_list.append(t['sent_id'])
+            trigger_word_idx_list.append(t['idx'])
+            trigger_label_list.append(t['value'])
+        sent_idx = torch.tensor(sent_idx_list).cuda()
+        trigger_word_idx = torch.stack(trigger_word_idx_list, dim=0).cuda()
+        trigger_label = torch.tensor(trigger_label_list)
+
+        return self.data[idx]['ids'], \
+               torch.tensor(self.data[idx]['labels'], dtype=torch.long), \
+               self.data[idx]['triggers'], \
+               self.data[idx]['trigger_masks'], \
+               data, \
+               attention, \
+               sent_idx, \
+               trigger_word_idx, \
+               trigger_label, \
+               self.data[idx]['graphs']
+        # return self.data[idx]['graphs'], torch.tensor(self.data[idx]['labels'], dtype=torch.long)
+
+    def create_graph(self, sentence_list, trigger_word_list):
+
+        d = defaultdict(list)
+        sent_num = len(sentence_list)
+        trigger_num = len(trigger_word_list)
+
+        # add neighbor edges
+        for i in range(1, sent_num):
+            d[('node', 'neighbor', 'node')].append((i, i + 1))
+            d[('node', 'neighbor', 'node')].append((i + 1, i))
+
+        # add global edges
+        for i in range(1, sent_num + 1):
+            d[('node', 'global', 'node')].append((0, i))
+            d[('node', 'global', 'node')].append((i, 0))
+
+        # add trigger-doc, trigger-sent edges
+        '''
+        for s in sentence_list:
+            if s['trigger'] == False:
+                continue
+            d[('node', 'trigger', 'node')].append((s['sent_id'] + 1, 0))  # uni-direction'''
+        for i in range(trigger_num):
+            j = i + sent_num + 1
+            # trigger-doc
+            d[('node', 'td', 'node')].append((0, j))
+            d[('node', 'td', 'node')].append((j, 0))
+
+            # trigger_sent
+            d[('node', 'ts', 'node')].append((j, trigger_word_list[i]['sent_id'] + 1))
+            d[('node', 'ts', 'node')].append((trigger_word_list[i]['sent_id'] + 1, j))
+
+        graph = dgl.heterograph(d)
+        # print(graph)
+
+        assert len(graph.etypes) == 4, "etypes wrong"
+
+        return graph
+
+
+class ChineseDataset(Dataset):
+
+    def __init__(self, src_file, save_file, label2idx,
+                 index, dataset_type='train', bert_path=None):
+
+        super(ChineseDataset, self).__init__()
+
+        self.data = []
+        self.document_data = None
+        self.document_max_length = 512
+        self.sentence_max_length = 150
+
+        print('Reading data from {}.'.format(src_file))
+        if os.path.exists(save_file):
+            with open(file=save_file, mode='rb') as fr:
+                info = pickle.load(fr)
+                self.document_data = info['data']
+            print('load preprocessed data from {}.'.format(save_file))
+        else:
+            bert = Bert(bert_path)
+            tok = BertTokenizer.from_pretrained(bert_path)
+            self.document_data = []
+
+            # read xml file
+            tree = ET.parse(src_file)
+            root = tree.getroot()
+            for doc in root[0]:
+                id = doc.attrib['id']
+                label = label2idx[doc.attrib['document_level_value']]
+
+                sentence_list = []
+                trigger_word_list = []
                 flag = False
                 for sent in doc:
                     if sent.text == '-EOP-.' or sent.text == '。':
