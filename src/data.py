@@ -8,8 +8,33 @@ from sklearn.model_selection import StratifiedKFold
 import dgl
 import numpy as np
 import torch
+import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 from transformers import BertTokenizer
+
+import scipy.sparse as sp
+import spacy
+nlp = spacy.load("en_core_web_trf")
+
+
+def normalize(mx):
+    """Row-normalize sparse matrix"""
+    rowsum = np.array(mx.sum(1))
+    r_inv = np.power(rowsum, -1).flatten()
+    r_inv[np.isinf(r_inv)] = 0.
+    r_mat_inv = sp.diags(r_inv)
+    mx = r_mat_inv.dot(mx)
+    return mx
+
+
+def sparse_mx_to_torch_sparse_tensor(sparse_mx):
+    """Convert a scipy sparse matrix to a torch sparse tensor."""
+    sparse_mx = sparse_mx.tocoo().astype(np.float32)
+    indices = torch.from_numpy(
+        np.vstack((sparse_mx.row, sparse_mx.col)).astype(np.int64))
+    values = torch.from_numpy(sparse_mx.data)
+    shape = torch.Size(sparse_mx.shape)
+    return torch.sparse.FloatTensor(indices, values, shape)
 
 
 def k_fold_split(data_path, k_fold):
@@ -203,7 +228,7 @@ class BERTDGLREDataset(Dataset):
 class MyDataset(Dataset):
 
     def __init__(self, src_file, save_file, label2idx,
-                 index, dataset_type='train', bert_path=None):
+                 dataset_index, dataset_type='train', bert_path=None):
 
         super(MyDataset, self).__init__()
 
@@ -211,6 +236,7 @@ class MyDataset(Dataset):
         self.document_data = None
         self.document_max_length = 512
         self.sentence_max_length = 150
+        self.max_word_num = 0
 
         print('Reading data from {}.'.format(src_file))
         if os.path.exists(save_file):
@@ -219,7 +245,6 @@ class MyDataset(Dataset):
                 self.document_data = info['data']
             print('load preprocessed data from {}.'.format(save_file))
         else:
-            bert = Bert(bert_path)
             tok = BertTokenizer.from_pretrained(bert_path)
             self.document_data = []
 
@@ -230,122 +255,180 @@ class MyDataset(Dataset):
                 id = doc.attrib['id']
                 label = label2idx[doc.attrib['document_level_value']]
 
+                # for doc
                 sentence_list = []
-                trigger_word_list = []
+                trigger_list = []
                 for sent in doc:
                     if sent.text == '-EOP- .':
                         continue
-                    s = ''
-                    for t in sent.itertext():
-                        s += t
-                    s = s.replace('-EOP- ', '').lower()
+
+                    trig_in1sent_info = []
+                    s = sent.text.replace("``", '"').replace("''", '"').replace('__', '_') if sent.text is not None else ''
+                    for event in sent:
+                        trigger = event.text.replace("``", '"').replace("''", '"').replace('__', '_')
+                        assert len(nlp(trigger)) == 1
+                        trig_in1sent_info.append({'index': len(nlp(s)),
+                                                  'token': trigger.lower(),
+                                                  'value': label2idx[event.attrib['sentence_level_value']]})
+
+                        tail = event.tail.replace("``", '"').replace("''", '"').replace('__', '_') if event.tail is not None else ''
+                        s += trigger + tail
+                    s = s.replace('-EOP- ', '')
                     if len(s.split()) <= 3:
                         continue
 
-                    data = tok(s, return_tensors='pt', padding='max_length', truncation=True, max_length=150)
-                    s_token, s_mask, s_starts, s_subwords = bert.subword_tokenize_to_ids(s.split())
-                    assert 0 == (data['input_ids'] != s_token).sum()
-                    sent_info = {'trigger_num': 0,
-                                 'data': s_token,
-                                 'attention': s_mask}
-                    if len(sent) > 0:
-                        # has triggers
-                        tmp = sent.text.lower() if sent.text is not None else ''
-                        for event in sent:
-                            pos = len(tmp.split())
-                            pos0 = s_starts[pos]
-                            pos1 = s_starts[pos + 1]
-                            if pos0 >= self.sentence_max_length - 1:
-                                break
-                            if pos1 >= self.sentence_max_length - 1:
-                                pos1 = self.sentence_max_length - 1
+                    # for sent
+                    sent_subwords = []
+                    word_list = {'token': [], 'idx': []}
+                    edges_src = []
+                    edges_dst = []
 
-                            trigger_word_idx = torch.zeros(self.sentence_max_length)
-                            trigger_word_idx[pos0:pos1] = 1.0 / (pos1 - pos0)
+                    parsed_data = nlp(s)
+                    for token in parsed_data:
+                        word = token.text.lower()
+                        word_subwords = tok.tokenize(word)
+                        pos0 = 1 + len(sent_subwords)
+                        pos1 = pos0 + len(word_subwords)
+                        if pos0 >= self.sentence_max_length - 1:
+                            break
+                        if pos1 > self.sentence_max_length - 1:
+                            pos1 = self.sentence_max_length - 1
 
-                            trigger_word_list.append({'sent_id': len(sentence_list),
-                                                      'idx': trigger_word_idx,
-                                                      'value': label2idx[event.attrib['sentence_level_value']]})
-                            tmp += event.text.lower() + event.tail.lower()
+                        word_idx = torch.zeros(self.sentence_max_length)
+                        word_idx[pos0:pos1] = 1.0 / (pos1 - pos0)
+                        word_list['token'].append(word)
+                        word_list['idx'].append(word_idx)
 
-                            sent_info['trigger_num'] += 1
-                    sentence_list.append(sent_info)
+                        if token.head.i != token.i:
+                            edges_src.append(token.head.i)
+                            edges_dst.append(token.i)
+
+                        sent_subwords += word_subwords
+
+                    for t in trig_in1sent_info:
+                        index = t['index']
+                        if index >= len(word_list['token']):
+                            break
+                        assert t['token'] == word_list['token'][index]
+                        trigger_list.append({'sent_id': len(sentence_list),
+                                             'index': index,
+                                             'idx': word_list['idx'][index],
+                                             'value': t['value']})
+
+                    data = tok(s.lower(), return_tensors='pt', padding='max_length', truncation=True, max_length=150)
+                    sent_idx = torch.stack(word_list['idx'], dim=0)
+                    sent_dep_adj = self.create_dep_adj(edges_src, edges_dst, len(word_list['idx']))
+                    sentence_list.append({'ids': data['input_ids'],
+                                          'mask': data['attention_mask'],
+                                          'idx': sent_idx,
+                                          'dep_adj': sent_dep_adj})
                     if len(sentence_list) >= 35:
                         break
 
-                trigger = ''
+                d = ''
                 for sent in doc:
                     if len(sent) > 0:
                         s = ''
                         for t in sent.itertext():
                             s += t
-                        s = s.replace('-EOP- ', '').lower()
-                        trigger += s + ' '
-                trigger_data = tok(trigger, return_tensors='pt', padding='max_length',
+                        s = s.replace('-EOP- ', '').replace("``", '"').replace("''", '"').replace('__', '_').lower()
+                        d += s + ' '
+                doc_data = tok(d, return_tensors='pt', padding='max_length',
                                    truncation=True, max_length=512)
 
                 # construct graph
-                graph = self.create_graph(sentence_list, trigger_word_list)
-
-                assert graph.number_of_nodes() == len(sentence_list) + len(trigger_word_list) + 1
+                graph = self.create_graph(sentence_list, trigger_list)
+                assert graph.number_of_nodes() == len(sentence_list) + len(trigger_list) + 1
 
                 self.document_data.append({
-                    'ids': id,
-                    'labels': label,
-                    'triggers': trigger_data['input_ids'],
-                    'trigger_masks': trigger_data['attention_mask'],
+                    'id': id,
+                    'label': label,
+                    'doc_ids': doc_data['input_ids'],
+                    'doc_mask': doc_data['attention_mask'],
+                    'max_word_num': self.max_word_num,
                     'sentences': sentence_list,
-                    'trigger_words': trigger_word_list,
-                    'graphs': graph
+                    'triggers': trigger_list,
+                    'graph': graph
                 })
+                self.max_word_num = 0
 
             # save data
             with open(file=save_file, mode='wb') as fw:
                 pickle.dump({'data': self.document_data}, fw)
             print('finish reading {} and save preprocessed data to {}.'.format(src_file, save_file))
 
-        for i in index[dataset_type]:
+        for i in dataset_index[dataset_type]:
             self.data.append(self.document_data[i])
 
     def __len__(self):
         return len(self.data)
 
     def __getitem__(self, idx):
+        max_word_num = self.data[idx]['max_word_num']
         sentence_list = self.data[idx]['sentences']
-        data_list = []
-        attention_list = []
+        sent_ids = []
+        sent_mask = []
+        sent_idx = []
+        sent_dep_adj = []
         for s in sentence_list:
-            data_list.append(s['data'])
-            attention_list.append(s['attention'])
-        data = torch.cat(data_list, dim=0)
-        attention = torch.cat(attention_list, dim=0)
+            sent_ids.append(s['ids'])
+            sent_mask.append(s['mask'])
 
-        trigger_word_list = self.data[idx]['trigger_words']
-        sent_idx_list = []
-        trigger_word_idx_list = []
-        trigger_label_list = []
-        for t in trigger_word_list:
-            sent_idx_list.append(t['sent_id'])
-            trigger_word_idx_list.append(t['idx'])
-            trigger_label_list.append(t['value'])
-        sent_idx = torch.tensor(sent_idx_list).cuda()
-        trigger_word_idx = torch.stack(trigger_word_idx_list, dim=0).cuda()
-        trigger_label = torch.tensor(trigger_label_list)
+            s_idx = s['idx']
+            word_num = s_idx.shape[0]
+            s_idx = torch.cat((s_idx, torch.zeros([max_word_num - word_num, self.sentence_max_length])), dim=0)
+            sent_idx.append(s_idx)
 
-        return self.data[idx]['ids'], \
-               torch.tensor(self.data[idx]['labels'], dtype=torch.long), \
-               self.data[idx]['triggers'], \
-               self.data[idx]['trigger_masks'], \
-               data, \
-               attention, \
+            dep_adj = s['dep_adj']
+            assert dep_adj.shape[0] == word_num
+            dep_adj = F.pad(dep_adj, [0, max_word_num - word_num, 0, max_word_num - word_num])
+            sent_dep_adj.append(dep_adj)
+
+        sent_ids = torch.cat(sent_ids, dim=0)  # [seq_num, seq_len]
+        sent_mask = torch.cat(sent_mask, dim=0)  # [seq_num, seq_len]
+        sent_idx = torch.stack(sent_idx, dim=0)  # [seq_num, word_num, seq_len]
+        sent_dep_adj = torch.stack(sent_dep_adj, dim=0)  # [seq_num, word_num, word_num]
+
+        trigger_list = self.data[idx]['triggers']
+        trigger_sid = []
+        trigger_index = []
+        trigger_label = []
+        for t in trigger_list:
+            trigger_sid.append(t['sent_id'])
+            trigger_index.append(t['index'])
+            assert (sent_idx[t['sent_id']][t['index']] != t['idx']).sum() == 0
+            trigger_label.append(t['value'])
+        trigger_sid = torch.tensor(trigger_sid)  # [trigger_num]
+        trigger_index = torch.tensor(trigger_index)  # [trigger_num]
+        trigger_label = torch.tensor(trigger_label)  # [trigger_num]
+
+        return self.data[idx]['id'], \
+               torch.tensor(self.data[idx]['label'], dtype=torch.long), \
+               self.data[idx]['doc_ids'], \
+               self.data[idx]['doc_mask'], \
+               sent_ids, \
+               sent_mask, \
                sent_idx, \
-               trigger_word_idx, \
+               sent_dep_adj, \
+               trigger_sid, \
+               trigger_index, \
                trigger_label, \
-               self.data[idx]['graphs']
-        # return self.data[idx]['graphs'], torch.tensor(self.data[idx]['labels'], dtype=torch.long)
+               self.data[idx]['graph']
+
+    def create_dep_adj(self, edges_src, edges_dst, num_nodes):
+        if self.max_word_num < num_nodes:
+            self.max_word_num = num_nodes
+
+        adj = sp.coo_matrix((np.ones(len(edges_src)), (edges_src, edges_dst)),
+                            shape=(num_nodes, num_nodes),
+                            dtype=np.float32)
+        # build symmetric adjacency matrix
+        adj = adj + adj.T.multiply(adj.T > adj) - adj.multiply(adj.T > adj)
+        adj = normalize(adj + sp.eye(adj.shape[0]))
+        adj = sparse_mx_to_torch_sparse_tensor(adj).to_dense()
+        return adj
 
     def create_graph(self, sentence_list, trigger_word_list):
-
         d = defaultdict(list)
         sent_num = len(sentence_list)
         trigger_num = len(trigger_word_list)
@@ -378,7 +461,6 @@ class MyDataset(Dataset):
 
         graph = dgl.heterograph(d)
         # print(graph)
-
         assert len(graph.etypes) == 4, "etypes wrong"
 
         return graph
@@ -683,22 +765,27 @@ class Bert():
 
 def collate(samples):
     # only consider batch_size=1
-    id, label, trigger, trigger_mask, data, attention, \
-    sent_idx, trigger_word_idx, trigger_label, graph = map(list, zip(*samples))
+    id, label, doc_ids, doc_mask, \
+    sent_ids, sent_mask, sent_idx, sent_dep_adj, \
+    trigger_sid, trigger_index, trigger_label, graph = map(list, zip(*samples))
 
-    batched_ids = tuple(id)
-    batched_labels = torch.tensor(label)
-    batched_triggers = torch.cat(trigger, dim=0)
-    batched_trigger_mask = torch.cat(trigger_mask, dim=0)
-    batched_data = torch.cat(data, dim=0)
-    batched_attention = torch.cat(attention, dim=0)
-    batched_sent_idx = sent_idx
-    batched_trigger_word_idx = trigger_word_idx
-    batched_trigger_labels = torch.cat(trigger_label, dim=0)
+    batched_id = tuple(id)
+    batched_label = torch.tensor(label)  # [bsz]
+    batched_doc_ids = torch.cat(doc_ids, dim=0)  # [bsz, doc_len]
+    batched_doc_mask = torch.cat(doc_mask, dim=0)  # [bsz, doc_len]
+
+    batched_sent_ids = torch.cat(sent_ids, dim=0)  # [bsz * seq_num, seq_len]
+    bacthed_sent_mask = torch.cat(sent_mask, dim=0)  # [bsz * seq_num, seq_len]
+    batched_sent_idx = sent_idx  # bsz * [seq_num, word_num, seq_len]
+    batched_sent_dep_adj = sent_dep_adj  # bsz * [seq_num, word_num, word_num]
+
+    batched_trigger_sid = trigger_sid  # bsz * [trigger_num]
+    batched_trigger_index = trigger_index  # bsz * [trigger_num]
+    batched_trigger_label = torch.cat(trigger_label, dim=0)  # [bsz * trigger_num]
     batched_graph = dgl.batch(graph)
-    return batched_ids, batched_labels, batched_triggers, batched_trigger_mask, \
-           batched_data, batched_attention, \
-           batched_sent_idx, batched_trigger_word_idx, batched_trigger_labels, \
+    return batched_id, batched_label, batched_doc_ids, batched_doc_mask, \
+           batched_sent_ids, bacthed_sent_mask, batched_sent_idx, batched_sent_dep_adj, \
+           batched_trigger_sid, batched_trigger_index, batched_trigger_label, \
            batched_graph
 
 
@@ -717,13 +804,13 @@ def get_data(opt, label2idx, index):
 
 
 if __name__ == '__main__':
-    index, label2idx = k_fold_split("../data/dlef_corpus/chinese.xml", 10)
-    train_set = MyDataset('../data/dlef_corpus/chinese.xml', '../data/train_chinese.pkl', label2idx, index[0],
-                                 dataset_type='train', bert_path="../../data/bert-base-chinese")
-    a0, b0, c0, d0, e0, f0, g0, h0, i0, j0 = train_set.__getitem__(1)
-    dataloader = DataLoader(train_set, batch_size=1, shuffle=False, collate_fn=collate)
-    for a1, b1, c1, d1, e1, f1, g1, h1, i1, j1 in dataloader:
-        g_unbatch = dgl.unbatch(j1)
-        n = g_unbatch[0].number_of_nodes('node')
+    index, label2idx = k_fold_split("../data/dlef_corpus/train.xml", 10)
+    train_set = MyDataset('../data/dlef_corpus/train.xml', '../data/train.pkl', label2idx, index[0],
+                          dataset_type='train', bert_path="../../data/bert-base-uncased")
+    _ = train_set.__getitem__(0)
+    dataloader = DataLoader(train_set, batch_size=2, shuffle=False, collate_fn=collate)
+    for _ in dataloader:
+        # g_unbatch = dgl.unbatch(j1)
+        # n = g_unbatch[0].number_of_nodes('node')
         print("hello")
     print("end")

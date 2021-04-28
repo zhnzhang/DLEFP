@@ -318,3 +318,104 @@ class RelEdgeLayer(nn.Module):
         g.apply_edges(lambda edges: {
             'h': self.dropout(self.activation(self.mapping(torch.cat((edges.src['h'], edges.dst['h']), dim=-1))))})
         g.ndata.pop('h')
+
+
+class GraphConvolution(nn.Module):
+    """
+    Simple GCN layer, similar to https://arxiv.org/abs/1609.02907
+    """
+
+    def __init__(self, in_features, out_features, lam, bias=True):
+        super(GraphConvolution, self).__init__()
+        self.in_features = in_features
+        self.out_features = out_features
+        self.lam = lam
+        self.weight = nn.Parameter(torch.FloatTensor(in_features, out_features))
+        if bias:
+            self.bias = nn.Parameter(torch.FloatTensor(out_features))
+        else:
+            self.register_parameter('bias', None)
+        self.reset_parameters()
+        self.linear1 = nn.Linear(out_features, out_features)
+        self.linear2 = nn.Linear(out_features, out_features)
+
+    def reset_parameters(self):
+        stdv = 1. / math.sqrt(self.weight.size(1))
+        self.weight.data.uniform_(-stdv, stdv)
+        if self.bias is not None:
+            self.bias.data.uniform_(-stdv, stdv)
+
+    def forward(self, input, adj, gate_adj=None):
+        # text: [bsz, word_num, in_features]
+        # adj: [bsz, word_num, word_num]
+        # gate_adj: [bsz, word_num, word_num]
+        hidden = torch.matmul(input, self.weight)
+        output = torch.matmul(adj, hidden)
+        lat_output = torch.matmul(gate_adj, hidden)
+
+        g = torch.sigmoid(self.linear1(output) + self.linear2(lat_output))
+        output = g * output + (1 - g) * lat_output
+
+        if self.bias is not None:
+            output = output + self.bias
+        output = F.relu(output)
+        return output
+
+
+class GCN(nn.Module):
+    def __init__(self, nfeat, nhid, nout, opt):
+        super(GCN, self).__init__()
+
+        self.gc1 = GraphConvolution(nfeat, nhid, opt.lam)
+        self.gc2 = GraphConvolution(nhid, nout, opt.lam)
+        self.dropout = opt.gcn_dropout
+        self.norm = nn.LayerNorm(nout)
+
+    def forward(self, x, adj, gate_adj=None):
+        res = x
+        x = self.gc1(x, adj, gate_adj)
+        x = F.dropout(x, self.dropout, training=self.training)
+        x = self.gc2(x, adj, gate_adj)
+        return x + res
+
+
+class MultiHeadAttention(nn.Module):
+    def __init__(self, h, d_model, dropout=0):
+        "Take in model size and number of heads."
+        super(MultiHeadAttention, self).__init__()
+        assert d_model % h == 0
+        # We assume d_v always equals d_k
+        self.d_k = d_model // h
+        self.h = h
+
+        self.w_q = nn.Linear(d_model, d_model)
+        self.w_k = nn.Linear(d_model, d_model)
+
+        self.dropout = nn.Dropout(p=dropout) if dropout != 0 else None
+
+    def forward(self, query, key, mask=None):
+        # query and value are two copies of sentence representation H
+        # query: [nbatches, seq_len, d_model]
+        # value: [nbatches, seq_len, d_model]
+        # mask: [nbatches, seq_len, seq_len]
+        nbatches = query.size(0)
+
+        # 1) Do all the linear projections in batch from d_model => h x d_k
+        query = self.w_q(query).view(nbatches, -1, self.h, self.d_k).transpose(1, 2)
+        key = self.w_k(key).view(nbatches, -1, self.h, self.d_k).transpose(1, 2)
+        # [nbatches, h, seq_len, d_k]
+
+        # 2) Apply attention on all the projected vectors in batch.
+        # Compute 'Scaled Dot Product Attention'
+        scores = torch.matmul(query, key.transpose(-2, -1)) \
+                 / math.sqrt(self.d_k)  # [nbatches, h, seq_len, seq_len]
+        if mask is not None:
+            key_padding_mask = mask.unsqueeze(1).unsqueeze(2)
+            scores = scores.masked_fill(key_padding_mask == 0, float("-inf"))
+        p_attn = entmax15(scores, dim=-1)  # [nbatches, h, seq_len, seq_len]
+        if self.dropout is not None:
+            p_attn = self.dropout(p_attn)
+
+        # 3) "Concat" using a view and apply a final linear.
+        p_attn = torch.sum(p_attn, dim=1) / self.h
+        return p_attn  # [nbatches, seq_len, seq_len]
