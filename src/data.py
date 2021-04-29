@@ -408,10 +408,10 @@ class MyDataset(Dataset):
                self.data[idx]['doc_mask'], \
                sent_ids, \
                sent_mask, \
-               sent_idx, \
-               sent_dep_adj, \
-               trigger_sid, \
-               trigger_index, \
+               sent_idx.to('cuda:0'), \
+               sent_dep_adj.to('cuda:0'), \
+               trigger_sid.to('cuda:0'), \
+               trigger_index.to('cuda:0'), \
                trigger_label, \
                self.data[idx]['graph']
 

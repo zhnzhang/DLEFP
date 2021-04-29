@@ -21,14 +21,14 @@ def train(model, trainloader, optimizer, opt):
                     trigger_sid, trigger_index, trigger_label, graph) in \
             enumerate(trainloader):
         if opt.gpu:
-            doc_ids = doc_ids.cuda()
-            doc_mask = doc_mask.cuda()
-            sent_ids = sent_ids.cuda()
-            sent_mask = sent_mask.cuda()
-            graph = graph.to('cuda')
+            doc_ids = doc_ids.to('cuda:0')
+            doc_mask = doc_mask.to('cuda:0')
+            sent_ids = sent_ids.to('cuda:0')
+            sent_mask = sent_mask.to('cuda:0')
+            graph = graph.to('cuda:1')
 
-            label = label.cuda()
-            trigger_label = trigger_label.cuda()
+            label = label.to('cuda:1')
+            trigger_label = trigger_label.to('cuda:1')
 
         optimizer.zero_grad()
 
@@ -68,13 +68,13 @@ def test(model, testloader, opt, filepath=None):
                         trigger_sid, trigger_index, trigger_label, graph) in \
                 enumerate(testloader):
             if opt.gpu:
-                doc_ids = doc_ids.cuda()
-                doc_mask = doc_mask.cuda()
-                sent_ids = sent_ids.cuda()
-                sent_mask = sent_mask.cuda()
-                graph = graph.to('cuda')
+                doc_ids = doc_ids.to('cuda:0')
+                doc_mask = doc_mask.to('cuda:0')
+                sent_ids = sent_ids.to('cuda:0')
+                sent_mask = sent_mask.to('cuda:0')
+                graph = graph.to('cuda:1')
 
-                label = label.cuda()
+                label = label.to('cuda:1')
 
             logit, _ = model(doc_ids=doc_ids,
                              doc_mask=doc_mask,
@@ -119,9 +119,9 @@ if __name__=='__main__':
         output_path = opt.output_path + "_" + str(i) + ".txt"
         trainloader, testloader = get_data(opt, label2idx, index[i])
         model = GAIN_BERT(opt, len(label2idx))
-        if opt.gpu:
+        # if opt.gpu:
             # model = nn.DataParallel(model)
-            model.cuda()
+            # model.cuda()
         optimizer = AdamW(model.parameters(), lr=opt.lr)
 
         max_f1 = 0

@@ -21,13 +21,13 @@ class GAIN_BERT(nn.Module):
         else:
             assert 1 == 2, "you should provide activation function."
 
-        self.bert = BertModel.from_pretrained(config.bert_path)
+        self.bert = BertModel.from_pretrained(config.bert_path).to('cuda:0')
         if config.bert_fix:
             for p in self.bert.parameters():
                 p.requires_grad = False
 
-        self.attn = MultiHeadAttention(config.n_heads, config.bert_hid_size)
-        self.sent_gcn = GCN(config.bert_hid_size, config.bert_hid_size, config.bert_hid_size)
+        self.attn = MultiHeadAttention(config.n_heads, config.bert_hid_size).to('cuda:0')
+        self.sent_gcn = GCN(config.bert_hid_size, config.bert_hid_size, config.bert_hid_size).to('cuda:0')
 
         # self.type_embedding = nn.Embedding(num_embeddings=3, embedding_dim=config.type_embed_dim)
 
@@ -40,10 +40,10 @@ class GAIN_BERT(nn.Module):
         self.GCN_layers = nn.ModuleList()
         self.GCN_layers.append(RelGraphConvLayer(self.gcn_in_dim, self.gcn_hid_dim, rel_name_lists,
                                                  num_bases=len(rel_name_lists), activation=self.activation,
-                                                 self_loop=True, dropout=self.dropout))
+                                                 self_loop=True, dropout=self.dropout).to('cuda:1'))
         self.GCN_layers.append(RelGraphConvLayer(self.gcn_hid_dim, self.gcn_out_dim, rel_name_lists,
                                                  num_bases=len(rel_name_lists), activation=self.activation,
-                                                 self_loop=True, dropout=self.dropout))
+                                                 self_loop=True, dropout=self.dropout).to('cuda:1'))
 
         self.bank_size = self.gcn_in_dim + self.gcn_hid_dim + self.gcn_out_dim
         # self.linear_dim = config.linear_dim
@@ -53,8 +53,8 @@ class GAIN_BERT(nn.Module):
             nn.Dropout(self.dropout),
             nn.Linear(self.linear_dim, num_classes),
         )'''
-        self.predict = nn.Linear(self.bank_size, num_classes)
-        self.trigger_predict = nn.Linear(self.bank_size, num_classes)
+        self.predict = nn.Linear(self.bank_size, num_classes).to('cuda:1')
+        self.trigger_predict = nn.Linear(self.bank_size, num_classes).to('cuda:1')
 
     def forward(self, **params):
         doc_ids = params['doc_ids']  # [bsz, doc_len]
@@ -108,7 +108,7 @@ class GAIN_BERT(nn.Module):
             t_feats = torch.stack(t_feats, dim=0)
             feature_list[i] = torch.cat((feature_list[i], t_feats), dim=0)
 
-        features = torch.cat(feature_list, dim=0)
+        features = torch.cat(feature_list, dim=0).to('cuda:1')
         assert features.size()[0] == batched_graph.number_of_nodes('node'), "number of nodes inconsistent"
         output_features = [features]
 
