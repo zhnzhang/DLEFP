@@ -29,7 +29,7 @@ class GAIN_BERT(nn.Module):
         self.attn = MultiHeadAttention(config.n_heads, config.bert_hid_size)
         self.sent_gcn = GCN(config.bert_hid_size, config.bert_hid_size, config.bert_hid_size)
 
-        self.type_embedding = nn.Embedding(num_embeddings=3, embedding_dim=config.type_embed_dim)
+        # self.type_embedding = nn.Embedding(num_embeddings=3, embedding_dim=config.type_embed_dim)
 
         self.gcn_in_dim = config.bert_hid_size
         self.gcn_hid_dim = config.gcn_hid_dim
@@ -46,7 +46,7 @@ class GAIN_BERT(nn.Module):
                                                  self_loop=True, dropout=self.dropout))
 
         self.bank_size = self.gcn_in_dim + self.gcn_hid_dim + self.gcn_out_dim
-        self.linear_dim = config.linear_dim
+        # self.linear_dim = config.linear_dim
         '''self.predict = nn.Sequential(
             nn.Linear(self.bank_size, self.linear_dim),
             self.activation,
@@ -99,7 +99,7 @@ class GAIN_BERT(nn.Module):
             key_padding_mask = torch.sum(s_idx[i], dim=-1)  # [seq_num, word_num]
             s_lat_adj = self.attn(word_embed, word_embed, mask=key_padding_mask)
 
-            x = self.gcn(word_embed, s_dep_adj, s_lat_adj)  # [seq_num, word_num, s_bank_size]
+            x = self.sent_gcn(word_embed, s_dep_adj[i], s_lat_adj)  # [seq_num, word_num, s_bank_size]
 
             t_feats = []
             trigger_num = t_sid[i].shape[0]

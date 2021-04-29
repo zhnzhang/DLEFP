@@ -23,13 +23,13 @@ def get_train_args():
 
     parser.add_argument('--activation', type=str, default="tanh")
     parser.add_argument('--dropout', type=float, default=0)
-    parser.add_argument('--linear_dim', type=int, default=300)
+    # parser.add_argument('--linear_dim', type=int, default=300)
 
-    parser.add_argument('--type_embed_dim', type=int, default=0)
+    # parser.add_argument('--type_embed_dim', type=int, default=0)
 
     # BERT
     parser.add_argument('--bert_hid_size', type=int, default=768)
-    parser.add_argument('--bert_path', type=str, default="bert-base-chinese")
+    parser.add_argument('--bert_path', type=str, default="bert-base-uncased")
     parser.add_argument('--bert_fix', default=False, action='store_true')
 
     parser.add_argument('--n_heads', type=int, default=8)
