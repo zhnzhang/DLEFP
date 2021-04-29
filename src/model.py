@@ -26,8 +26,8 @@ class GAIN_BERT(nn.Module):
             for p in self.bert.parameters():
                 p.requires_grad = False
 
-        self.attn = MultiHeadAttention(config.n_heads, config.bert_hid_size).to('cuda:0')
-        self.sent_gcn = GCN(config.bert_hid_size, config.bert_hid_size, config.bert_hid_size).to('cuda:0')
+        self.attn = MultiHeadAttention(config.n_heads, config.bert_hid_size).to('cuda:1')
+        self.sent_gcn = GCN(config.bert_hid_size, config.bert_hid_size, config.bert_hid_size).to('cuda:1')
 
         # self.type_embedding = nn.Embedding(num_embeddings=3, embedding_dim=config.type_embed_dim)
 
@@ -61,17 +61,20 @@ class GAIN_BERT(nn.Module):
         doc_mask = params['doc_mask']  # [bsz, doc_len]
         bsz = doc_ids.size()[0]
         _, document_cls = self.bert(input_ids=doc_ids, attention_mask=doc_mask)  # [bsz, bert_dim]
+        document_cls = document_cls.to('cuda:1')
 
         sent_ids = params['sent_ids']  # [bsz * seq_num, seq_len]
         sent_mask = params['sent_mask']  # [bsz * seq_num, seq_len]
         sentence_embed, sentence_cls = self.bert(input_ids=sent_ids, attention_mask=sent_mask)
+        sentence_embed = sentence_embed.to('cuda:1')
+        sentence_cls = sentence_cls.to('cuda:1')
         _, seq_len, bert_dim = sentence_embed.shape
         # sentence_embed: [bsz * seq_num, seq_len, bert_dim]
         # sentence_cls: [bsz * seq_num, bert_dim]
 
         # sentence graph
-        s_idx = params['sent_idx']  # bsz * [seq_num, word_num, seq_len]
-        s_dep_adj = params['sent_dep_adj']  # bsz * [seq_num, word_num, word_num]
+        s_idx = params['sent_idx']  # [bsz * seq_num, word_num, seq_len]
+        s_dep_adj = params['sent_dep_adj']  # [bsz * seq_num, word_num, word_num]
         t_sid = params['trigger_sid']  # bsz * [trigger_num]
         t_index = params['trigger_index']  # bsz * [trigger_num]
 
@@ -85,30 +88,26 @@ class GAIN_BERT(nn.Module):
             sentence_num = s_idx[i].shape[0]
             split_sizes.append(sentence_num)
         feature_list = list(torch.split(sentence_cls, split_sizes, dim=0))
-        sent = list(torch.split(sentence_embed, split_sizes, dim=0))  # bsz * [seq_num, seq_len, bert_dim]
+
+        word_embed = torch.sum(s_idx.unsqueeze(-1) * sentence_embed.unsqueeze(1), dim=2)  # [bsz * seq_num, word_num,
+        # bert_dim]
+        # latent adjacent matrix
+        key_padding_mask = torch.sum(s_idx, dim=-1)  # [bsz * seq_num, word_num]
+        s_lat_adj = self.attn(word_embed, word_embed, mask=key_padding_mask)
+        x = self.sent_gcn(word_embed, s_dep_adj, s_lat_adj)  # [bsz * seq_num, word_num, s_bank_size]
+        x_list = list(torch.split(x, split_sizes, dim=0))  # bsz * [seq_num, word_num, s_bank_size]
 
         for i in range(bsz):
             feature_list[i] = torch.cat((document_cls[i].unsqueeze(0), feature_list[i]), dim=0)
 
-            # trigger_features
-            # sentence graph
-            word_embed = torch.sum(s_idx[i].unsqueeze(-1) * sent[i].unsqueeze(1), dim=2)  # [seq_num, word_num,
-            # bert_dim]
-
-            # latent adjacent matrix
-            key_padding_mask = torch.sum(s_idx[i], dim=-1)  # [seq_num, word_num]
-            s_lat_adj = self.attn(word_embed, word_embed, mask=key_padding_mask)
-
-            x = self.sent_gcn(word_embed, s_dep_adj[i], s_lat_adj)  # [seq_num, word_num, s_bank_size]
-
             t_feats = []
             trigger_num = t_sid[i].shape[0]
             for j in range(trigger_num):
-                t_feats.append(x[t_sid[i][j]][t_index[i][j]])
+                t_feats.append(x_list[i][t_sid[i][j]][t_index[i][j]])
             t_feats = torch.stack(t_feats, dim=0)
             feature_list[i] = torch.cat((feature_list[i], t_feats), dim=0)
 
-        features = torch.cat(feature_list, dim=0).to('cuda:1')
+        features = torch.cat(feature_list, dim=0)
         assert features.size()[0] == batched_graph.number_of_nodes('node'), "number of nodes inconsistent"
         output_features = [features]
 

@@ -359,12 +359,14 @@ class MyDataset(Dataset):
 
         for i in dataset_index[dataset_type]:
             self.data.append(self.document_data[i])
+            if self.max_word_num < self.document_data[i]['max_word_num']:
+                self.max_word_num = self.document_data[i]['max_word_num']
 
     def __len__(self):
         return len(self.data)
 
     def __getitem__(self, idx):
-        max_word_num = self.data[idx]['max_word_num']
+        max_word_num = self.max_word_num
         sentence_list = self.data[idx]['sentences']
         sent_ids = []
         sent_mask = []
@@ -408,10 +410,10 @@ class MyDataset(Dataset):
                self.data[idx]['doc_mask'], \
                sent_ids, \
                sent_mask, \
-               sent_idx.to('cuda:0'), \
-               sent_dep_adj.to('cuda:0'), \
-               trigger_sid.to('cuda:0'), \
-               trigger_index.to('cuda:0'), \
+               sent_idx.to('cuda:1'), \
+               sent_dep_adj.to('cuda:1'), \
+               trigger_sid.to('cuda:1'), \
+               trigger_index.to('cuda:1'), \
                trigger_label, \
                self.data[idx]['graph']
 
@@ -776,8 +778,8 @@ def collate(samples):
 
     batched_sent_ids = torch.cat(sent_ids, dim=0)  # [bsz * seq_num, seq_len]
     bacthed_sent_mask = torch.cat(sent_mask, dim=0)  # [bsz * seq_num, seq_len]
-    batched_sent_idx = sent_idx  # bsz * [seq_num, word_num, seq_len]
-    batched_sent_dep_adj = sent_dep_adj  # bsz * [seq_num, word_num, word_num]
+    batched_sent_idx = torch.cat(sent_idx, dim=0)  # bsz * [seq_num, word_num, seq_len]
+    batched_sent_dep_adj = torch.cat(sent_dep_adj, dim=0)  # bsz * [seq_num, word_num, word_num]
 
     batched_trigger_sid = trigger_sid  # bsz * [trigger_num]
     batched_trigger_index = trigger_index  # bsz * [trigger_num]
