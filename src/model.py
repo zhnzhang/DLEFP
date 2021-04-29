@@ -2,7 +2,11 @@ import dgl
 import dgl.nn.pytorch as dglnn
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from transformers import BertModel
+
+import math
+from entmax import entmax15
 
 
 class GAIN_BERT(nn.Module):
@@ -21,6 +25,9 @@ class GAIN_BERT(nn.Module):
         if config.bert_fix:
             for p in self.bert.parameters():
                 p.requires_grad = False
+
+        self.attn = MultiHeadAttention(config.n_heads, config.bert_hid_size)
+        self.sent_gcn = GCN(config.bert_hid_size, config.bert_hid_size, config.bert_hid_size)
 
         self.type_embedding = nn.Embedding(num_embeddings=3, embedding_dim=config.type_embed_dim)
 
@@ -50,63 +57,67 @@ class GAIN_BERT(nn.Module):
         self.trigger_predict = nn.Linear(self.bank_size, num_classes)
 
     def forward(self, **params):
-        '''
-        words: [batch_size, max_length]
-        src_lengths: [batchs_size]
-        mask: [batch_size, max_length]
-        entity_type: [batch_size, max_length]
-        entity_id: [batch_size, max_length]
-        mention_id: [batch_size, max_length]
-        distance: [batch_size, max_length]
-        entity2mention_table: list of [local_entity_num, local_mention_num]
-        graphs: list of DGLHeteroGraph
-        h_t_pairs: [batch_size, h_t_limit, 2]
-        ht_pair_distance: [batch_size, h_t_limit]
-        '''
-        triggers = params['triggers']
-        trigger_masks = params['trigger_masks']
-        bsz = triggers.size()[0]
-        _, document_cls = self.bert(input_ids=triggers, attention_mask=trigger_masks)
+        doc_ids = params['doc_ids']  # [bsz, doc_len]
+        doc_mask = params['doc_mask']  # [bsz, doc_len]
+        bsz = doc_ids.size()[0]
+        _, document_cls = self.bert(input_ids=doc_ids, attention_mask=doc_mask)  # [bsz, bert_dim]
 
-        words = params['words']  # [bsz, seq_len]
-        masks = params['masks']  # [bsz, seq_len]
-        sentence_embed, sentence_cls = self.bert(input_ids=words, attention_mask=masks)  # sentence_cls: [bsz,
-        # bert_dim], sentence_embed: [bsz (seq_num), seq_len, bert_dim]
+        sent_ids = params['sent_ids']  # [bsz * seq_num, seq_len]
+        sent_mask = params['sent_mask']  # [bsz * seq_num, seq_len]
+        sentence_embed, sentence_cls = self.bert(input_ids=sent_ids, attention_mask=sent_mask)
+        _, seq_len, bert_dim = sentence_embed.shape
+        # sentence_embed: [bsz * seq_num, seq_len, bert_dim]
+        # sentence_cls: [bsz * seq_num, bert_dim]
 
-        sent_idx = params['sent_idx']  # bsz * [trigger_num]
-        trigger_word_idx = params['trigger_word_idx']  # bsz * [trigger_num, seq_len]
+        # sentence graph
+        s_idx = params['sent_idx']  # bsz * [seq_num, word_num, seq_len]
+        s_dep_adj = params['sent_dep_adj']  # bsz * [seq_num, word_num, word_num]
+        t_sid = params['trigger_sid']  # bsz * [trigger_num]
+        t_index = params['trigger_index']  # bsz * [trigger_num]
 
-        graph_big = params['graphs']
-        graphs = dgl.unbatch(graph_big)
+        batched_graph = params['graph']
+        graphs = dgl.unbatch(batched_graph)
 
         assert len(graphs) == bsz, "batch size inconsistent"
 
         split_sizes = []
         for i in range(bsz):
-            sentence_num = graphs[i].number_of_nodes('node') - 1 - sent_idx[i].shape[0]
+            sentence_num = s_idx[i].shape[0]
             split_sizes.append(sentence_num)
         feature_list = list(torch.split(sentence_cls, split_sizes, dim=0))
-        sentence_embed_list = list(torch.split(sentence_embed, split_sizes, dim=0))
+        sent = list(torch.split(sentence_embed, split_sizes, dim=0))  # bsz * [seq_num, seq_len, bert_dim]
 
         for i in range(bsz):
             feature_list[i] = torch.cat((document_cls[i].unsqueeze(0), feature_list[i]), dim=0)
 
-            # 1. extract sentences with triggers
-            t = sentence_embed_list[i].index_select(0, sent_idx[i])  # [trigger_num, seq_len, bert_dim]
-            # 2. extract trigger embeds
-            trigger_embed = torch.sum(trigger_word_idx[i].unsqueeze(-1) * t, dim=1)
-            feature_list[i] = torch.cat((feature_list[i], trigger_embed), dim=0)
+            # trigger_features
+            # sentence graph
+            word_embed = torch.sum(s_idx[i].unsqueeze(-1) * sent[i].unsqueeze(1), dim=2)  # [seq_num, word_num,
+            # bert_dim]
+
+            # latent adjacent matrix
+            key_padding_mask = torch.sum(s_idx[i], dim=-1)  # [seq_num, word_num]
+            s_lat_adj = self.attn(word_embed, word_embed, mask=key_padding_mask)
+
+            x = self.gcn(word_embed, s_dep_adj, s_lat_adj)  # [seq_num, word_num, s_bank_size]
+
+            t_feats = []
+            trigger_num = t_sid[i].shape[0]
+            for j in range(trigger_num):
+                t_feats.append(x[t_sid[i][j]][t_index[i][j]])
+            t_feats = torch.stack(t_feats, dim=0)
+            feature_list[i] = torch.cat((feature_list[i], t_feats), dim=0)
 
         features = torch.cat(feature_list, dim=0)
-        assert features.size()[0] == graph_big.number_of_nodes('node'), "number of nodes inconsistent"
+        assert features.size()[0] == batched_graph.number_of_nodes('node'), "number of nodes inconsistent"
         output_features = [features]
 
         for GCN_layer in self.GCN_layers:
-            features = GCN_layer(graph_big, {"node": features})["node"]  # [total_node_nums, gcn_dim]
+            features = GCN_layer(batched_graph, {"node": features})["node"]  # [total_node_nums, gcn_dim]
             output_features.append(features)
 
         output_feature = torch.cat(output_features, dim=-1)
-        assert output_feature.size()[0] == graph_big.number_of_nodes('node'), "number of nodes inconsistent"
+        assert output_feature.size()[0] == batched_graph.number_of_nodes('node'), "number of nodes inconsistent"
 
         idx = 0
         document_features = []
@@ -325,11 +336,10 @@ class GraphConvolution(nn.Module):
     Simple GCN layer, similar to https://arxiv.org/abs/1609.02907
     """
 
-    def __init__(self, in_features, out_features, lam, bias=True):
+    def __init__(self, in_features, out_features, bias=True):
         super(GraphConvolution, self).__init__()
         self.in_features = in_features
         self.out_features = out_features
-        self.lam = lam
         self.weight = nn.Parameter(torch.FloatTensor(in_features, out_features))
         if bias:
             self.bias = nn.Parameter(torch.FloatTensor(out_features))
@@ -351,10 +361,12 @@ class GraphConvolution(nn.Module):
         # gate_adj: [bsz, word_num, word_num]
         hidden = torch.matmul(input, self.weight)
         output = torch.matmul(adj, hidden)
-        lat_output = torch.matmul(gate_adj, hidden)
 
-        g = torch.sigmoid(self.linear1(output) + self.linear2(lat_output))
-        output = g * output + (1 - g) * lat_output
+        if gate_adj is not None:
+            lat_output = torch.matmul(gate_adj, hidden)
+
+            g = torch.sigmoid(self.linear1(output) + self.linear2(lat_output))
+            output = g * output + (1 - g) * lat_output
 
         if self.bias is not None:
             output = output + self.bias
@@ -363,18 +375,15 @@ class GraphConvolution(nn.Module):
 
 
 class GCN(nn.Module):
-    def __init__(self, nfeat, nhid, nout, opt):
+    def __init__(self, nfeat, nhid, nout):
         super(GCN, self).__init__()
 
-        self.gc1 = GraphConvolution(nfeat, nhid, opt.lam)
-        self.gc2 = GraphConvolution(nhid, nout, opt.lam)
-        self.dropout = opt.gcn_dropout
-        self.norm = nn.LayerNorm(nout)
+        self.gc1 = GraphConvolution(nfeat, nhid)
+        self.gc2 = GraphConvolution(nhid, nout)
 
     def forward(self, x, adj, gate_adj=None):
         res = x
         x = self.gc1(x, adj, gate_adj)
-        x = F.dropout(x, self.dropout, training=self.training)
         x = self.gc2(x, adj, gate_adj)
         return x + res
 

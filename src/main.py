@@ -16,32 +16,33 @@ def train(model, trainloader, optimizer, opt):
     # start_time = time.time()
 
     loss_list = []
-    for batch_idx, (ids, labels, triggers, trigger_masks, words, masks,
-                    sent_idx, trigger_word_idx, trigger_labels, graphs) in \
+    for batch_idx, (id, label, doc_ids, doc_mask,
+                    sent_ids, sent_mask, sent_idx, sent_dep_adj,
+                    trigger_sid, trigger_index, trigger_label, graph) in \
             enumerate(trainloader):
         if opt.gpu:
-            triggers = triggers.cuda()
-            trigger_masks = trigger_masks.cuda()
-            words = words.cuda()
-            masks = masks.cuda()
-            # sent_idx = sent_idx.cuda()
-            # trigger_word_idx = trigger_word_idx.cuda()
-            graphs = graphs.to('cuda')
-            labels = labels.cuda()
-            trigger_labels = trigger_labels.cuda()
+            doc_ids = doc_ids.cuda()
+            doc_mask = doc_mask.cuda()
+            sent_ids = sent_ids.cuda()
+            sent_mask = sent_mask.cuda()
+            graph = graph.to('cuda')
+
+            label = label.cuda()
+            trigger_label = trigger_label.cuda()
 
         optimizer.zero_grad()
 
-        logit, trigger_logit = model(ids=ids,
-                                    triggers=triggers,
-                                    trigger_masks=trigger_masks,
-                                    words=words,
-                                    masks=masks,
-                                    sent_idx=sent_idx,
-                                    trigger_word_idx=trigger_word_idx,
-                                    graphs=graphs)
-        main_loss = nn.functional.cross_entropy(logit, labels)
-        aux_loss = nn.functional.cross_entropy(trigger_logit, trigger_labels)
+        logit, trigger_logit = model(doc_ids=doc_ids,
+                                     doc_mask=doc_mask,
+                                     sent_ids=sent_ids,
+                                     sent_mask=sent_mask,
+                                     sent_idx=sent_idx,
+                                     sent_dep_adj=sent_dep_adj,
+                                     trigger_sid=trigger_sid,
+                                     trigger_index=trigger_index,
+                                     graph=graph)
+        main_loss = nn.functional.cross_entropy(logit, label)
+        aux_loss = nn.functional.cross_entropy(trigger_logit, trigger_label)
         loss = main_loss + opt.labmda * aux_loss
 
         loss.backward()
@@ -62,37 +63,37 @@ def test(model, testloader, opt, filepath=None):
     y_true = []
     y_pred = []
     with torch.no_grad():
-        for batch_idx, (ids, labels, triggers, trigger_masks, words, masks,
-                        sent_idx, trigger_word_idx, trigger_labels, graphs) in \
+        for batch_idx, (id, label, doc_ids, doc_mask,
+                        sent_ids, sent_mask, sent_idx, sent_dep_adj,
+                        trigger_sid, trigger_index, trigger_label, graph) in \
                 enumerate(testloader):
             if opt.gpu:
-                triggers = triggers.cuda()
-                trigger_masks = trigger_masks.cuda()
-                words = words.cuda()
-                masks = masks.cuda()
-                # sent_idx = sent_idx.cuda()
-                # trigger_word_idx = trigger_word_idx.cuda()
-                graphs = graphs.to('cuda')
-                labels = labels.cuda()
-                trigger_labels = trigger_labels.cuda()
+                doc_ids = doc_ids.cuda()
+                doc_mask = doc_mask.cuda()
+                sent_ids = sent_ids.cuda()
+                sent_mask = sent_mask.cuda()
+                graph = graph.to('cuda')
 
-            logit, _ = model(ids=ids,
-                             triggers=triggers,
-                             trigger_masks=trigger_masks,
-                             words=words,
-                             masks=masks,
+                label = label.cuda()
+
+            logit, _ = model(doc_ids=doc_ids,
+                             doc_mask=doc_mask,
+                             sent_ids=sent_ids,
+                             sent_mask=sent_mask,
                              sent_idx=sent_idx,
-                             trigger_word_idx=trigger_word_idx,
-                             graphs=graphs)
+                             sent_dep_adj=sent_dep_adj,
+                             trigger_sid=trigger_sid,
+                             trigger_index=trigger_index,
+                             graph=graph)
             _, predicted = torch.max(logit.data,1)
-            correct += predicted.data.eq(labels.data).cpu().sum()
-            y_true += labels.cpu().data.numpy().tolist()
+            correct += predicted.data.eq(label.data).cpu().sum()
+            y_true += label.cpu().data.numpy().tolist()
             y_pred += predicted.cpu().data.numpy().tolist()
 
             if filepath is not None:
-                batch = labels.shape[0]
+                batch = label.shape[0]
                 for i in range(batch):
-                    f.write(ids[i] + "\t" + str(labels[i].item()) + "\t" + str(predicted[i].item()) + "\n")
+                    f.write(id[i] + "\t" + str(label[i].item()) + "\t" + str(predicted[i].item()) + "\n")
 
     f1_micro = f1_score(y_true, y_pred, labels=[0, 1, 2], average='micro')
     f1_macro = f1_score(y_true, y_pred, labels=[0, 1, 2], average='macro')
